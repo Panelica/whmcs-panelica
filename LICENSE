@@ -1,0 +1,26 @@
+Panelica WHMCS Server Module — Proprietary License
+
+Copyright (c) 2026 Panelica (https://www.panelica.com)
+All rights reserved.
+
+This software (the "Module") is the property of Panelica and is provided for use
+by licensed Panelica customers to integrate WHMCS with Panelica control-panel
+servers.
+
+Permission is granted, free of charge, to any person or organisation operating a
+valid Panelica server to install, use, and modify the Module for the sole purpose
+of provisioning and managing hosting accounts on their own Panelica server(s).
+
+Restrictions:
+
+1. You may not resell, sublicense, or redistribute the Module as a standalone
+   product, whether modified or unmodified.
+2. You may not remove or alter this copyright notice or the Panelica branding
+   contained in the Module.
+3. The Module is provided "AS IS", without warranty of any kind, express or
+   implied, including but not limited to the warranties of merchantability,
+   fitness for a particular purpose, and non-infringement. In no event shall
+   Panelica be liable for any claim, damages, or other liability arising from
+   the use of the Module.
+
+For commercial redistribution or OEM licensing, contact info@panelica.com.

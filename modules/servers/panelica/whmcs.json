@@ -1,0 +1,24 @@
+{
+    "schema": "1.0",
+    "type": "whmcs-servers",
+    "name": "panelica",
+    "version": "1.0.0",
+    "license": "proprietary",
+    "category": "provisioning",
+    "compatibility": {
+        "whmcs": ">=8.0 <9.1",
+        "tested": "9.0.6",
+        "php": ">=7.4"
+    },
+    "description": {
+        "name": "Panelica",
+        "tagline": "Provision and manage hosting accounts on Panelica control panel servers.",
+        "long": "Official Panelica server provisioning module. Automates account creation, suspension, termination, password changes, plan changes and disk/bandwidth usage synchronisation through the Panelica External API (HMAC-SHA256 authenticated)."
+    },
+    "authors": [
+        {
+            "name": "Panelica",
+            "homepage": "https://www.panelica.com"
+        }
+    ]
+}
