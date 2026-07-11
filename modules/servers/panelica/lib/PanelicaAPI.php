@@ -390,6 +390,329 @@ if (!class_exists('PanelicaAPI')) {
         }
 
         // -------------------------------------------------------------
+        // DNS zone editor
+        // -------------------------------------------------------------
+
+        /** GET /v1/dns/zones/{domainId}/records */
+        public function listDnsRecords($domainId)
+        {
+            return $this->request('GET', '/v1/dns/zones/' . rawurlencode($domainId) . '/records');
+        }
+
+        /** POST /v1/dns/zones/{domainId}/records */
+        public function createDnsRecord($domainId, $type, $name, $content, $ttl = 3600)
+        {
+            return $this->request('POST', '/v1/dns/zones/' . rawurlencode($domainId) . '/records', array(
+                'type'    => $type,
+                'name'    => $name,
+                'content' => $content,
+                'ttl'     => (int) $ttl,
+            ));
+        }
+
+        /** DELETE /v1/dns/records/{id} */
+        public function deleteDnsRecord($id)
+        {
+            return $this->request('DELETE', '/v1/dns/records/' . rawurlencode($id));
+        }
+
+        // -------------------------------------------------------------
+        // Cron jobs
+        // -------------------------------------------------------------
+
+        /** GET /v1/cron-jobs */
+        public function listCron()
+        {
+            return $this->request('GET', '/v1/cron-jobs');
+        }
+
+        /** POST /v1/cron-jobs */
+        public function createCron($domainId, $taskName, $command, $minute, $hour, $dayOfMonth, $month, $dayOfWeek)
+        {
+            return $this->request('POST', '/v1/cron-jobs', array(
+                'domain_id'    => $domainId,
+                'task_name'    => $taskName,
+                'command'      => $command,
+                'minute'       => $minute,
+                'hour'         => $hour,
+                'day_of_month' => $dayOfMonth,
+                'month'        => $month,
+                'day_of_week'  => $dayOfWeek,
+                'enabled'      => true,
+            ));
+        }
+
+        /** DELETE /v1/cron-jobs/{id} */
+        public function deleteCron($id)
+        {
+            return $this->request('DELETE', '/v1/cron-jobs/' . rawurlencode($id));
+        }
+
+        // -------------------------------------------------------------
+        // SSL / TLS
+        // -------------------------------------------------------------
+
+        /** GET /v1/ssl/domains/{domainId} -> {has_ssl, ...} */
+        public function getSsl($domainId)
+        {
+            return $this->request('GET', '/v1/ssl/domains/' . rawurlencode($domainId));
+        }
+
+        /** POST /v1/ssl/domains/{domainId}/issue (Let's Encrypt) */
+        public function issueSsl($domainId)
+        {
+            return $this->request('POST', '/v1/ssl/domains/' . rawurlencode($domainId) . '/issue', array());
+        }
+
+        // -------------------------------------------------------------
+        // File manager
+        // -------------------------------------------------------------
+
+        public function accessibleDirectories($userId)
+        {
+            return $this->request('GET', '/v1/files/accessible-directories?user_id=' . rawurlencode($userId));
+        }
+
+        public function listFiles($userId, $path)
+        {
+            return $this->request('GET', '/v1/files?user_id=' . rawurlencode($userId) . '&path=' . rawurlencode($path));
+        }
+
+        public function readFileContent($userId, $path)
+        {
+            return $this->request('GET', '/v1/files/content?user_id=' . rawurlencode($userId) . '&path=' . rawurlencode($path));
+        }
+
+        public function writeFileContent($userId, $path, $content)
+        {
+            return $this->request('PUT', '/v1/files/content', array(
+                'user_id' => $userId, 'path' => $path, 'content' => $content,
+            ));
+        }
+
+        /** $type = "file" | "folder" */
+        public function createFile($userId, $path, $name, $type, $content = '')
+        {
+            $body = array('user_id' => $userId, 'path' => $path, 'name' => $name, 'type' => $type);
+            if ($content !== '') {
+                $body['content'] = $content;
+            }
+            return $this->request('POST', '/v1/files', $body);
+        }
+
+        /** DELETE /v1/files with body {paths:[...]} (signature excludes body) */
+        public function deleteFiles($userId, array $paths, $permanent = false)
+        {
+            return $this->request('DELETE', '/v1/files', array(
+                'user_id' => $userId, 'paths' => array_values($paths), 'permanent' => (bool) $permanent,
+            ));
+        }
+
+        // -------------------------------------------------------------
+        // Backups
+        // -------------------------------------------------------------
+
+        public function listBackups()
+        {
+            return $this->request('GET', '/v1/backups');
+        }
+
+        public function createBackup(array $domainIds = array(), $name = '')
+        {
+            $body = array();
+            if (!empty($domainIds)) {
+                $body['domain_ids'] = array_values($domainIds);
+            }
+            if ($name !== '') {
+                $body['backup_name'] = $name;
+            }
+            return $this->request('POST', '/v1/backups', $body);
+        }
+
+        public function deleteBackup($filename)
+        {
+            return $this->request('DELETE', '/v1/backups/' . rawurlencode($filename));
+        }
+
+        public function restoreBackup($filename)
+        {
+            return $this->request('POST', '/v1/backups/' . rawurlencode($filename) . '/restore', array());
+        }
+
+        // -------------------------------------------------------------
+        // Email forwarders / autoresponders
+        // -------------------------------------------------------------
+
+        public function listForwarders($domainId)
+        {
+            return $this->request('GET', '/v1/domains/' . rawurlencode($domainId) . '/email-forwarders');
+        }
+
+        public function createForwarder($domainId, $source, $destination)
+        {
+            return $this->request('POST', '/v1/domains/' . rawurlencode($domainId) . '/email-forwarders', array(
+                'source' => $source, 'destination' => $destination,
+            ));
+        }
+
+        public function deleteForwarder($id)
+        {
+            return $this->request('DELETE', '/v1/email-forwarders/' . rawurlencode($id));
+        }
+
+        public function listAutoresponders($domainId)
+        {
+            return $this->request('GET', '/v1/domains/' . rawurlencode($domainId) . '/email-autoresponders');
+        }
+
+        public function createAutoresponder($domainId, $emailAccountId, $subject, $message)
+        {
+            return $this->request('POST', '/v1/domains/' . rawurlencode($domainId) . '/email-autoresponders', array(
+                'email_account_id' => $emailAccountId, 'subject' => $subject, 'message' => $message,
+            ));
+        }
+
+        public function deleteAutoresponder($id)
+        {
+            return $this->request('DELETE', '/v1/email-autoresponders/' . rawurlencode($id));
+        }
+
+        // -------------------------------------------------------------
+        // MySQL users
+        // -------------------------------------------------------------
+
+        public function listMysqlUsers()
+        {
+            return $this->request('GET', '/v1/mysql-users');
+        }
+
+        public function createMysqlUser($domainId, $username, $password)
+        {
+            return $this->request('POST', '/v1/mysql-users', array(
+                'domain_id' => $domainId, 'username' => $username, 'password' => $password,
+            ));
+        }
+
+        public function deleteMysqlUser($id)
+        {
+            return $this->request('DELETE', '/v1/mysql-users/' . rawurlencode($id));
+        }
+
+        // -------------------------------------------------------------
+        // Redirects
+        // -------------------------------------------------------------
+
+        public function listRedirects($domainId)
+        {
+            return $this->request('GET', '/v1/domains/' . rawurlencode($domainId) . '/redirects');
+        }
+
+        public function createRedirect($domainId, $sourcePath, $destinationUrl, $redirectType = '301')
+        {
+            return $this->request('POST', '/v1/domains/' . rawurlencode($domainId) . '/redirects', array(
+                'source_path' => $sourcePath, 'destination_url' => $destinationUrl, 'redirect_type' => $redirectType,
+            ));
+        }
+
+        public function deleteRedirect($id)
+        {
+            return $this->request('DELETE', '/v1/redirects/' . rawurlencode($id));
+        }
+
+        // -------------------------------------------------------------
+        // Per-domain settings: PHP version + ModSecurity
+        // -------------------------------------------------------------
+
+        public function listPhpVersions()
+        {
+            return $this->request('GET', '/v1/php/versions');
+        }
+
+        public function getDomainPhp($domainId)
+        {
+            return $this->request('GET', '/v1/domains/' . rawurlencode($domainId) . '/php');
+        }
+
+        public function updateDomainPhp($domainId, array $fields)
+        {
+            return $this->request('PATCH', '/v1/domains/' . rawurlencode($domainId) . '/php', $fields);
+        }
+
+        public function getModsecurity($domainId)
+        {
+            return $this->request('GET', '/v1/domains/' . rawurlencode($domainId) . '/modsecurity');
+        }
+
+        public function updateModsecurity($domainId, array $fields)
+        {
+            return $this->request('PATCH', '/v1/domains/' . rawurlencode($domainId) . '/modsecurity', $fields);
+        }
+
+        // -------------------------------------------------------------
+        // WordPress (list + one-click wp-admin login)
+        // -------------------------------------------------------------
+
+        public function listWordPress($accountId)
+        {
+            return $this->request('GET', '/v1/wordpress?account_id=' . rawurlencode($accountId));
+        }
+
+        public function wpAutoLogin($accountId, $installId)
+        {
+            return $this->request('POST', '/v1/wordpress/' . rawurlencode($installId) . '/auto-login?account_id=' . rawurlencode($accountId), array());
+        }
+
+        public function wpUpdatePlugins($accountId, $installId)
+        {
+            return $this->request('POST', '/v1/wordpress/' . rawurlencode($installId) . '/update-plugins?account_id=' . rawurlencode($accountId), array());
+        }
+
+        public function wpUpdateCore($accountId, $installId)
+        {
+            return $this->request('POST', '/v1/wordpress/' . rawurlencode($installId) . '/update-core?account_id=' . rawurlencode($accountId), array());
+        }
+
+        public function wpListBackups($accountId, $installId)
+        {
+            return $this->request('GET', '/v1/wordpress/' . rawurlencode($installId) . '/backups?account_id=' . rawurlencode($accountId));
+        }
+
+        public function wpCreateBackup($accountId, $installId)
+        {
+            return $this->request('POST', '/v1/wordpress/' . rawurlencode($installId) . '/backup?account_id=' . rawurlencode($accountId), array());
+        }
+
+        public function wpRestoreBackup($accountId, $installId, $backupId)
+        {
+            return $this->request('POST', '/v1/wordpress/' . rawurlencode($installId) . '/backups/' . rawurlencode($backupId) . '/restore?account_id=' . rawurlencode($accountId), array());
+        }
+
+        // -------------------------------------------------------------
+        // Email deliverability (SPF / DKIM) — per domain
+        // -------------------------------------------------------------
+
+        public function getDkim($domainId)
+        {
+            return $this->request('GET', '/v1/domains/' . rawurlencode($domainId) . '/dkim');
+        }
+
+        public function enableDkim($domainId)
+        {
+            return $this->request('POST', '/v1/domains/' . rawurlencode($domainId) . '/dkim/enable', array());
+        }
+
+        public function getSpf($domainId)
+        {
+            return $this->request('GET', '/v1/domains/' . rawurlencode($domainId) . '/spf');
+        }
+
+        // Combined SPF + DKIM in one round-trip (replaces getDkim + getSpf).
+        public function getDeliverability($domainId)
+        {
+            return $this->request('GET', '/v1/domains/' . rawurlencode($domainId) . '/email-deliverability');
+        }
+
+        // -------------------------------------------------------------
         // Core signed request
         // -------------------------------------------------------------
 
@@ -413,11 +736,6 @@ if (!class_exists('PanelicaAPI')) {
             $method = strtoupper($method);
             $timestamp = (string) time();
 
-            // DELETE: server excludes body from signature — never send one.
-            if ($method === 'DELETE') {
-                $body = null;
-            }
-
             $bodyString = '';
             if ($body !== null) {
                 $bodyString = json_encode($body, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
@@ -426,8 +744,13 @@ if (!class_exists('PanelicaAPI')) {
                 }
             }
 
+            // DELETE: the backend excludes the body from the HMAC signature but
+            // still reads it (e.g. file manager delete needs {paths:[...]}). So we
+            // sign with an empty body for DELETE, yet still transmit the body.
+            $signBody = ($method === 'DELETE') ? '' : $bodyString;
+
             // Sign the path the backend will see ("/v1/..."), NOT the public path.
-            $stringToSign = $method . $path . $timestamp . $bodyString;
+            $stringToSign = $method . $path . $timestamp . $signBody;
             $signature = hash_hmac('sha256', $stringToSign, $this->apiSecret);
 
             $url = 'https://' . $this->host . ':' . $this->port . self::PUBLIC_PREFIX . $path;

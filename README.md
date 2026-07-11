@@ -13,7 +13,7 @@ Automates the full hosting account lifecycle through the Panelica External API
 | Change Password | Panel login password is updated |
 | Upgrade / Downgrade | Account is moved to the new Panelica plan — **kernel cgroup limits re-applied instantly** |
 | Usage Update (nightly) | Disk & bandwidth usage and limits synced into WHMCS |
-| Client Area | Live overview: disk gauge, monthly bandwidth, domain/email/db/FTP counts + panel login button |
+| Client Area | Full self-service suite (see below) — dashboard, email, DNS, files, databases, WordPress and more, without ever leaving WHMCS |
 
 ## Single Sign-On (one-click panel login)
 
@@ -29,21 +29,48 @@ and WHMCS redirects to `https://panel:8443/auto-login?token=...`.
 
 ## Client area self-service
 
-Give the WHMCS API key the extra scopes (`email:*`, `ftp:*`, `domains:*`) and
-the client area gains **scope-aware self-service tabs** — customers manage
-these without ever logging into the panel:
+Give the WHMCS API key the extra scopes and the client area turns into a full
+hosting control panel — customers manage everything from inside WHMCS, without
+ever logging into the panel. The product page loads instantly (an AJAX skeleton
+renders first, then each tab lazy-loads its data):
 
-- **Email accounts** — create / list / delete (with quota)
+- **Dashboard** — disk gauge, monthly bandwidth, domain/email/database/FTP counts
+- **Email** — accounts (with quota), forwarders, autoresponders, and
+  **Email Deliverability**: live SPF status and one-click **DKIM signing** with
+  the exact DNS record to publish
+- **WordPress** — every install detected on the account, each with **one-click
+  wp-admin login**, **update plugins**, **update core**, and **backups**
+  (create / list / one-click restore)
+- **DNS zone editor** — A / CNAME / MX / TXT / … records (create / list / delete)
+- **File manager** — browse, create folders/files, edit in-place, delete
 - **FTP accounts** — create / list / delete
 - **Subdomains** — create / list / delete
+- **Databases** — MySQL users (create / list / delete) + one-click phpMyAdmin
+- **Redirects** — domain redirects (301/302)
+- **Cron jobs** — scheduled tasks (create / list / delete)
+- **Backups** — on-demand account backup + restore
+- **SSL** — status + one-click Let's Encrypt issuance
+- **PHP** — switch the website's PHP version
 
-Tabs only appear when the key carries the matching scope, so a plain
+Every tab only appears when the API key carries the matching scope, so a plain
 `billing_integration` key still shows a clean Overview-only client area.
 
-> **Database self-service is intentionally read-only** (count shown on the
-> Overview). The Panelica External API's `POST /v1/databases` adds a user to an
-> *existing* domain database rather than creating a new one, so the module does
-> not expose a "create database" form. This is a panel-side limitation.
+## Security
+
+The client area is built with a defence-in-depth posture:
+
+- **Account-scoped operations** — every self-service action is verified to belong
+  to the WHMCS service's own Panelica account. A customer can never see, restore,
+  or delete another account's resource (backups, mail, DNS, files, …), even by
+  guessing an object id.
+- **Output-safe rendering** — all panel data (file names, email addresses, DNS
+  content, …) is HTML/attribute-escaped before display, so hostile content in a
+  file name can never inject markup or script into the client area.
+- **No secrets in the browser** — the API key/secret never leave the WHMCS
+  server; requests are HMAC-SHA256 signed server-side. Module logs mask
+  credentials.
+- **Session-lock friendly** — the AJAX endpoints release the PHP session write
+  lock immediately, so a tab's parallel requests never serialise or hang.
 
 ## Two plan modes
 
@@ -79,8 +106,8 @@ Managed plans are hidden from the manual plan dropdown.
 | **WHMCS** | **8.0 – 9.0.x.** Developed and tested on **WHMCS 9.0.6**. The "Login to Panel" single sign-on uses the WHMCS 8.0+ SSO framework; on older WHMCS the rest of the module works normally and SSO is simply hidden. |
 | **PHP** | **7.4+** — the module contains no PHP 8-only syntax. Tested on **PHP 8.3**. |
 | **PHP extensions** | `curl`, `json`, `hash` (all standard). **No ionCube** — the module ships as plain, readable PHP. |
-| **Client area themes** | Works with the standard Six / Twenty-One themes (Bootstrap markup). |
-| **Panelica server** | Any currently supported version. SSO additionally requires a build exposing `POST /v1/accounts/{id}/sso-login` (external-server ≥ 1.0.5). |
+| **Client area themes** | Verified on the standard **Six, Twenty-One and Nexus** themes — pure vanilla JS with both Bootstrap 3 and 5 tab markup, so it renders and works across theme generations. |
+| **Panelica server** | Any currently supported version for the core lifecycle. The richer client-area tools need a recent external-server build: **SSO** ≥ 1.0.5, **WordPress management / Email Deliverability / accurate disk usage** ≥ 1.0.6, **account-scoped self-service deletes** ≥ 1.0.7. Older panels simply hide the features they don't support. |
 | **Panelica license** | The **API Access** feature must be enabled. |
 
 > **Tested matrix (evidence):** WHMCS 9.0.6-release.1 · PHP 8.3.31 — full 40-function
@@ -120,6 +147,11 @@ No activation step is needed — server modules are picked up automatically.
    - **Rate limit tier**: `professional` recommended for busy client areas.
 4. Create. The panel shows the **API Key** (`pk_live_...`) and
    **API Secret** (`sk_live_...`) **only once** — copy both now.
+
+> **Tip:** to unlock the full client-area self-service suite (email, DNS, files,
+> WordPress, backups, …) plus one-click SSO, issue a **full-access (`*:*`)**
+> key instead. The module hides any tab whose scope the key lacks, so you stay
+> in control of exactly what customers can do.
 
 ## Step 2 — Add the server in WHMCS
 

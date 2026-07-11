@@ -432,6 +432,87 @@ function panelica_formatMb($mb)
 }
 
 /**
+ * The set of domain names owned by this account (lowercased), from the
+ * account-domains listing. Used to scope the (server-level) backup API down to
+ * the client's own domains so one customer can never see, restore, or delete a
+ * backup that contains another account's data.
+ */
+function panelica_acctDomainNames(array $dr)
+{
+    $out = array();
+    foreach (($dr['data'] ?? array()) as $d) {
+        if (!is_array($d)) { continue; }
+        $dn = $d['domain_name'] ?? $d['name'] ?? $d['domain'] ?? '';
+        if ($dn !== '') { $out[] = strtolower($dn); }
+    }
+    return $out;
+}
+
+/**
+ * A server backup "belongs to" this account only when every domain it contains
+ * is one of the account's own domains. Backups with unknown scope (no
+ * domain_names) are treated as NOT owned — a safe default that hides
+ * server-wide backups from the client.
+ */
+function panelica_backupOwnedByAccount(array $backup, array $acctDomains)
+{
+    $names = isset($backup['domain_names']) && is_array($backup['domain_names']) ? $backup['domain_names'] : array();
+    if (empty($names)) { return false; }
+    foreach ($names as $n) {
+        if (!in_array(strtolower($n), $acctDomains, true)) { return false; }
+    }
+    return true;
+}
+
+/**
+ * The set of item IDs the account actually owns for a given client-area tab,
+ * mirroring the exact scoping the list view uses. The module authenticates with
+ * a server-wide (root) API key, so the panel's own RBAC does NOT constrain a
+ * delete to this account — the module must verify ownership itself before
+ * deleting, otherwise a client could remove ANOTHER account's resource by
+ * supplying a guessed/known UUID (IDOR).
+ */
+function panelica_ownedIds(PanelicaAPI $api, $tab, $aid, $did)
+{
+    $ids = array();
+    $collect = function ($data) use (&$ids) {
+        foreach ((is_array($data) ? $data : array()) as $x) {
+            if (is_array($x) && !empty($x['id'])) { $ids[] = $x['id']; }
+        }
+    };
+    switch ($tab) {
+        case 'email':          $collect($api->listAccountEmails($aid)['data'] ?? array()); break;
+        case 'forwarders':     if ($did !== '') { $collect($api->listForwarders($did)['data'] ?? array()); } break;
+        case 'autoresponders': if ($did !== '') { $collect($api->listAutoresponders($did)['data'] ?? array()); } break;
+        case 'subdomains':     if ($did !== '') { $collect($api->listSubdomains($did)['data'] ?? array()); } break;
+        case 'dns':            if ($did !== '') { $collect($api->listDnsRecords($did)['data'] ?? array()); } break;
+        case 'redirects':      if ($did !== '') { $collect($api->listRedirects($did)['data'] ?? array()); } break;
+        case 'ftp':
+            foreach (($api->listFtp()['data'] ?? array()) as $f) {
+                if ((isset($f['user_id']) && $f['user_id'] === $aid) || (isset($f['domain_id']) && $f['domain_id'] === $did)) {
+                    if (!empty($f['id'])) { $ids[] = $f['id']; }
+                }
+            }
+            break;
+        case 'cron':
+            foreach (($api->listCron()['data'] ?? array()) as $j) {
+                if ((isset($j['user_id']) && $j['user_id'] === $aid) || (isset($j['domain_id']) && $j['domain_id'] === $did) || (!isset($j['user_id']) && !isset($j['domain_id']))) {
+                    if (!empty($j['id'])) { $ids[] = $j['id']; }
+                }
+            }
+            break;
+        case 'mysql':
+            foreach (($api->listMysqlUsers()['data'] ?? array()) as $u) {
+                if ((isset($u['user_id']) && $u['user_id'] === $aid) || (isset($u['domain_id']) && $u['domain_id'] === $did) || (!isset($u['user_id']) && !isset($u['domain_id']))) {
+                    if (!empty($u['id'])) { $ids[] = $u['id']; }
+                }
+            }
+            break;
+    }
+    return $ids;
+}
+
+/**
  * Build the managed plan specification from product config options.
  * Returns ['basic' => ..., 'advanced' => ..., 'hash' => ...] where "basic"
  * feeds POST /v1/plans and "advanced" feeds PATCH /v1/plans/{id}
@@ -995,6 +1076,15 @@ function panelica_selfServiceCaps(array $scopes)
         'email'     => $has('email:write'),
         'ftp'       => $has('ftp:write'),
         'subdomain' => $has('domains:write'),
+        'dns'       => $has('dns:write'),
+        'cron'      => $has('accounts:write'),
+        'ssl'       => $has('domains:write'),
+        'files'     => $has('files:read'),
+        'backup'    => $has('backups:read'),
+        'mysql'     => $has('databases:write'),
+        'redirect'  => $has('domains:write'),
+        'settings'  => $has('domains:write'),
+        'wordpress' => $has('accounts:read'),
     );
 }
 
@@ -1014,67 +1104,35 @@ function panelica_ClientArea(array $params)
         'error'       => '',
         'flash'       => panelica_takeFlash(),
         'serviceId'   => isset($params['serviceid']) ? (int) $params['serviceid'] : 0,
-        'caps'        => array('email' => false, 'ftp' => false, 'subdomain' => false),
+        'caps'        => array('email' => false, 'ftp' => false, 'subdomain' => false, 'dns' => false, 'cron' => false, 'ssl' => false, 'files' => false, 'backup' => false, 'mysql' => false, 'redirect' => false),
         'emails'      => array(),
         'ftpAccounts' => array(),
         'subdomains'  => array(),
-        'primaryDomainId' => '',
+        'dnsRecords'  => array(),
+        'cronJobs'    => array(),
+        'sslStatus'   => array(),
+        'forwarders'  => array(),
+        'autoresponders' => array(),
+        'mysqlUsers'  => array(),
+        'redirects'   => array(),
+        'backups'     => array(),
+        'fmFiles'     => array(),
+        'fmPath'      => '',
+        'fmParent'    => '',
+        'fmCrumbs'    => array(),
+        'fmRoot'      => '',
+        'fmEditPath'  => '',
+        'fmEditContent' => '',
+        'primaryDomainId'   => '',
+        'primaryDomainName' => '',
     );
 
-    try {
-        $api = panelica_getApi($params);
-        $account = panelica_requireAccount($api, $params);
-        $accountId = $account['id'];
-
-        // Overview stats.
-        $stats = $api->getAccountStats($accountId);
-        $disk  = $api->getDiskUsage($accountId);
-        $usedMb  = isset($disk['data']['used_mb']) ? (int) $disk['data']['used_mb'] : 0;
-        $quotaMb = isset($disk['data']['quota_mb']) ? (int) $disk['data']['quota_mb'] : 0;
-        $vars = array_merge($vars, array(
-            'hasStats'      => true,
-            'diskUsedMb'    => $usedMb,
-            'diskQuota'     => panelica_formatMb($quotaMb),
-            'diskPct'       => ($quotaMb > 0) ? min(100, (int) round($usedMb * 100 / $quotaMb)) : 0,
-            'bandwidthMb'   => isset($stats['data']['bandwidth_mb']) ? (int) $stats['data']['bandwidth_mb'] : 0,
-            'domainCount'   => isset($stats['data']['domain_count']) ? (int) $stats['data']['domain_count'] : 0,
-            'emailCount'    => isset($stats['data']['email_count']) ? (int) $stats['data']['email_count'] : 0,
-            'databaseCount' => isset($stats['data']['database_count']) ? (int) $stats['data']['database_count'] : 0,
-            'ftpCount'      => isset($stats['data']['ftp_count']) ? (int) $stats['data']['ftp_count'] : 0,
-        ));
-
-        // Capabilities from key scopes.
-        $me = $api->me();
-        $scopes = isset($me['data']['scopes']) && is_array($me['data']['scopes']) ? $me['data']['scopes'] : array();
-        $caps = panelica_selfServiceCaps($scopes);
-        $vars['caps'] = $caps;
-
-        // Primary domain (first website) for create forms.
-        $domainsResp = $api->listAccountDomains($accountId);
-        $domains = isset($domainsResp['data']) && is_array($domainsResp['data']) ? $domainsResp['data'] : array();
-        $primaryDomainId = !empty($domains[0]['id']) ? $domains[0]['id'] : '';
-        $vars['primaryDomainId'] = $primaryDomainId;
-
-        if ($caps['email']) {
-            $er = $api->listAccountEmails($accountId);
-            $vars['emails'] = isset($er['data']) && is_array($er['data']) ? $er['data'] : array();
-        }
-        if ($caps['ftp']) {
-            $fr = $api->listFtp();
-            $ftps = isset($fr['data']) && is_array($fr['data']) ? $fr['data'] : array();
-            // Key owner is admin -> filter to this account's FTP users.
-            $vars['ftpAccounts'] = array_values(array_filter($ftps, function ($f) use ($accountId, $primaryDomainId) {
-                return (isset($f['user_id']) && $f['user_id'] === $accountId)
-                    || (isset($f['domain_id']) && $f['domain_id'] === $primaryDomainId);
-            }));
-        }
-        if ($caps['subdomain'] && $primaryDomainId !== '') {
-            $sr = $api->listSubdomains($primaryDomainId);
-            $vars['subdomains'] = isset($sr['data']) && is_array($sr['data']) ? $sr['data'] : array();
-        }
-    } catch (Exception $e) {
-        $vars['error'] = $e->getMessage();
-    }
+    // Zero API calls here — the product page renders instantly. Capabilities,
+    // dashboard stats and every tab's data all load afterwards via panelica_Api
+    // (AJAX, pnl_op=dashboard + per-tab). Tabs render for ALL capabilities and
+    // JS hides the ones the API key actually lacks.
+    $vars['caps'] = array('email' => true, 'ftp' => true, 'subdomain' => true, 'dns' => true, 'cron' => true, 'ssl' => true, 'files' => true, 'backup' => true, 'mysql' => true, 'redirect' => true, 'settings' => true, 'wordpress' => true);
+    $vars['hasStats'] = true;
 
     return array(
         'templatefile' => 'templates/overview',
@@ -1094,6 +1152,16 @@ function panelica_ClientAreaAllowedFunctions()
         'CreateEmail', 'DeleteEmail',
         'CreateFtp', 'DeleteFtp',
         'CreateSubdomain', 'DeleteSubdomain',
+        'CreateDnsRecord', 'DeleteDnsRecord',
+        'CreateCron', 'DeleteCron',
+        'IssueSsl',
+        'CreateForwarder', 'DeleteForwarder',
+        'CreateAutoresponder', 'DeleteAutoresponder',
+        'CreateMysqlUser', 'DeleteMysqlUser',
+        'CreateRedirect', 'DeleteRedirect',
+        'CreateBackup', 'RestoreBackup', 'DeleteBackup',
+        'FmMkdir', 'FmNewFile', 'FmSave', 'FmDelete', 'FmAjax',
+        'Api',
     );
 }
 
@@ -1244,6 +1312,634 @@ function panelica_DeleteSubdomain(array $params)
         panelica_setFlash('danger', $e->getMessage());
     }
     return '';
+}
+
+/**
+ * Client-area: create a DNS record on the account's primary zone.
+ */
+function panelica_CreateDnsRecord(array $params)
+{
+    try {
+        $api = panelica_getApi($params);
+        list($account, $domainId) = panelica_ctx($api, $params);
+        if ($domainId === '') {
+            throw new Exception('No website found for this account yet.');
+        }
+        $type    = isset($_POST['dns_type']) ? strtoupper(trim($_POST['dns_type'])) : '';
+        $name    = isset($_POST['dns_name']) ? trim($_POST['dns_name']) : '';
+        $content = isset($_POST['dns_content']) ? trim($_POST['dns_content']) : '';
+        $ttl     = isset($_POST['dns_ttl']) && (int) $_POST['dns_ttl'] > 0 ? (int) $_POST['dns_ttl'] : 3600;
+        if ($type === '' || $name === '' || $content === '') {
+            throw new Exception('Record type, name and content are all required.');
+        }
+        $api->createDnsRecord($domainId, $type, $name, $content, $ttl);
+        panelica_setFlash('success', 'DNS record created.');
+    } catch (Exception $e) {
+        panelica_setFlash('danger', $e->getMessage());
+    }
+    return '';
+}
+
+function panelica_DeleteDnsRecord(array $params)
+{
+    try {
+        $api = panelica_getApi($params);
+        $id = isset($_POST['id']) ? trim($_POST['id']) : (isset($_GET['id']) ? trim($_GET['id']) : '');
+        if ($id === '') {
+            throw new Exception('Missing DNS record id.');
+        }
+        $api->deleteDnsRecord($id);
+        panelica_setFlash('success', 'DNS record deleted.');
+    } catch (Exception $e) {
+        panelica_setFlash('danger', $e->getMessage());
+    }
+    return '';
+}
+
+/**
+ * Client-area: create a cron job.
+ */
+function panelica_CreateCron(array $params)
+{
+    try {
+        $api = panelica_getApi($params);
+        list($account, $domainId) = panelica_ctx($api, $params);
+        if ($domainId === '') {
+            throw new Exception('No website found for this account yet.');
+        }
+        $command = isset($_POST['cron_command']) ? trim($_POST['cron_command']) : '';
+        $name    = isset($_POST['cron_name']) ? trim($_POST['cron_name']) : 'cron';
+        $minute  = isset($_POST['cron_minute']) && $_POST['cron_minute'] !== '' ? trim($_POST['cron_minute']) : '*';
+        $hour    = isset($_POST['cron_hour']) && $_POST['cron_hour'] !== '' ? trim($_POST['cron_hour']) : '*';
+        $dom     = isset($_POST['cron_dom']) && $_POST['cron_dom'] !== '' ? trim($_POST['cron_dom']) : '*';
+        $month   = isset($_POST['cron_month']) && $_POST['cron_month'] !== '' ? trim($_POST['cron_month']) : '*';
+        $dow     = isset($_POST['cron_dow']) && $_POST['cron_dow'] !== '' ? trim($_POST['cron_dow']) : '*';
+        if ($command === '') {
+            throw new Exception('The command to run is required.');
+        }
+        $api->createCron($domainId, $name, $command, $minute, $hour, $dom, $month, $dow);
+        panelica_setFlash('success', 'Cron job created.');
+    } catch (Exception $e) {
+        panelica_setFlash('danger', $e->getMessage());
+    }
+    return '';
+}
+
+function panelica_DeleteCron(array $params)
+{
+    try {
+        $api = panelica_getApi($params);
+        $id = isset($_POST['id']) ? trim($_POST['id']) : (isset($_GET['id']) ? trim($_GET['id']) : '');
+        if ($id === '') {
+            throw new Exception('Missing cron job id.');
+        }
+        $api->deleteCron($id);
+        panelica_setFlash('success', 'Cron job deleted.');
+    } catch (Exception $e) {
+        panelica_setFlash('danger', $e->getMessage());
+    }
+    return '';
+}
+
+/**
+ * Client-area: request a free Let's Encrypt certificate for the primary domain.
+ */
+function panelica_IssueSsl(array $params)
+{
+    try {
+        $api = panelica_getApi($params);
+        list($account, $domainId) = panelica_ctx($api, $params);
+        if ($domainId === '') {
+            throw new Exception('No website found for this account yet.');
+        }
+        $api->issueSsl($domainId);
+        panelica_setFlash('success', 'SSL certificate requested — issuance runs in the background and may take a minute.');
+    } catch (Exception $e) {
+        panelica_setFlash('danger', $e->getMessage());
+    }
+    return '';
+}
+
+/* ---------------- Email forwarders ---------------- */
+function panelica_CreateForwarder(array $params)
+{
+    try {
+        $api = panelica_getApi($params);
+        list($account, $domainId) = panelica_ctx($api, $params);
+        if ($domainId === '') { throw new Exception('No website found for this account yet.'); }
+        $source = isset($_POST['fwd_source']) ? trim($_POST['fwd_source']) : '';
+        $dest   = isset($_POST['fwd_dest']) ? trim($_POST['fwd_dest']) : '';
+        if ($source === '' || $dest === '') { throw new Exception('Both source and destination are required.'); }
+        $api->createForwarder($domainId, $source, $dest);
+        panelica_setFlash('success', 'Forwarder created.');
+    } catch (Exception $e) { panelica_setFlash('danger', $e->getMessage()); }
+    return '';
+}
+function panelica_DeleteForwarder(array $params)
+{
+    try {
+        $api = panelica_getApi($params);
+        $id = isset($_POST['id']) ? trim($_POST['id']) : (isset($_GET['id']) ? trim($_GET['id']) : '');
+        if ($id === '') { throw new Exception('Missing forwarder id.'); }
+        $api->deleteForwarder($id);
+        panelica_setFlash('success', 'Forwarder deleted.');
+    } catch (Exception $e) { panelica_setFlash('danger', $e->getMessage()); }
+    return '';
+}
+
+/* ---------------- Autoresponders ---------------- */
+function panelica_CreateAutoresponder(array $params)
+{
+    try {
+        $api = panelica_getApi($params);
+        list($account, $domainId) = panelica_ctx($api, $params);
+        if ($domainId === '') { throw new Exception('No website found for this account yet.'); }
+        $emailId = isset($_POST['ar_email_id']) ? trim($_POST['ar_email_id']) : '';
+        $subject = isset($_POST['ar_subject']) ? trim($_POST['ar_subject']) : '';
+        $message = isset($_POST['ar_message']) ? trim($_POST['ar_message']) : '';
+        if ($emailId === '' || $subject === '' || $message === '') { throw new Exception('Email account, subject and message are required.'); }
+        $api->createAutoresponder($domainId, $emailId, $subject, $message);
+        panelica_setFlash('success', 'Autoresponder created.');
+    } catch (Exception $e) { panelica_setFlash('danger', $e->getMessage()); }
+    return '';
+}
+function panelica_DeleteAutoresponder(array $params)
+{
+    try {
+        $api = panelica_getApi($params);
+        $id = isset($_POST['id']) ? trim($_POST['id']) : (isset($_GET['id']) ? trim($_GET['id']) : '');
+        if ($id === '') { throw new Exception('Missing autoresponder id.'); }
+        $api->deleteAutoresponder($id);
+        panelica_setFlash('success', 'Autoresponder deleted.');
+    } catch (Exception $e) { panelica_setFlash('danger', $e->getMessage()); }
+    return '';
+}
+
+/* ---------------- MySQL users ---------------- */
+function panelica_CreateMysqlUser(array $params)
+{
+    try {
+        $api = panelica_getApi($params);
+        list($account, $domainId) = panelica_ctx($api, $params);
+        if ($domainId === '') { throw new Exception('No website found for this account yet.'); }
+        $u = isset($_POST['db_user']) ? trim($_POST['db_user']) : '';
+        $p = isset($_POST['db_pass']) ? (string) $_POST['db_pass'] : '';
+        if ($u === '' || strlen($p) < 8) { throw new Exception('Username and a password of at least 8 characters are required.'); }
+        $api->createMysqlUser($domainId, $u, $p);
+        panelica_setFlash('success', 'Database user created.');
+    } catch (Exception $e) { panelica_setFlash('danger', $e->getMessage()); }
+    return '';
+}
+function panelica_DeleteMysqlUser(array $params)
+{
+    try {
+        $api = panelica_getApi($params);
+        $id = isset($_POST['id']) ? trim($_POST['id']) : (isset($_GET['id']) ? trim($_GET['id']) : '');
+        if ($id === '') { throw new Exception('Missing database user id.'); }
+        $api->deleteMysqlUser($id);
+        panelica_setFlash('success', 'Database user deleted.');
+    } catch (Exception $e) { panelica_setFlash('danger', $e->getMessage()); }
+    return '';
+}
+
+/* ---------------- Redirects ---------------- */
+function panelica_CreateRedirect(array $params)
+{
+    try {
+        $api = panelica_getApi($params);
+        list($account, $domainId) = panelica_ctx($api, $params);
+        if ($domainId === '') { throw new Exception('No website found for this account yet.'); }
+        $src  = isset($_POST['rdr_source']) ? trim($_POST['rdr_source']) : '';
+        $dst  = isset($_POST['rdr_dest']) ? trim($_POST['rdr_dest']) : '';
+        $type = isset($_POST['rdr_type']) ? trim($_POST['rdr_type']) : '301';
+        if ($src === '' || $dst === '') { throw new Exception('Source path and destination URL are required.'); }
+        $api->createRedirect($domainId, $src, $dst, $type);
+        panelica_setFlash('success', 'Redirect created.');
+    } catch (Exception $e) { panelica_setFlash('danger', $e->getMessage()); }
+    return '';
+}
+function panelica_DeleteRedirect(array $params)
+{
+    try {
+        $api = panelica_getApi($params);
+        $id = isset($_POST['id']) ? trim($_POST['id']) : (isset($_GET['id']) ? trim($_GET['id']) : '');
+        if ($id === '') { throw new Exception('Missing redirect id.'); }
+        $api->deleteRedirect($id);
+        panelica_setFlash('success', 'Redirect deleted.');
+    } catch (Exception $e) { panelica_setFlash('danger', $e->getMessage()); }
+    return '';
+}
+
+/* ---------------- Backups ---------------- */
+function panelica_CreateBackup(array $params)
+{
+    try {
+        $api = panelica_getApi($params);
+        panelica_requireAccount($api, $params);
+        $name = isset($_POST['backup_name']) ? trim($_POST['backup_name']) : '';
+        $api->createBackup(array(), $name);
+        panelica_setFlash('success', 'Backup started — it runs in the background.');
+    } catch (Exception $e) { panelica_setFlash('danger', $e->getMessage()); }
+    return '';
+}
+function panelica_RestoreBackup(array $params)
+{
+    try {
+        $api = panelica_getApi($params);
+        $file = isset($_POST['filename']) ? trim($_POST['filename']) : '';
+        if ($file === '') { throw new Exception('Missing backup filename.'); }
+        $api->restoreBackup($file);
+        panelica_setFlash('success', 'Restore started — it runs in the background.');
+    } catch (Exception $e) { panelica_setFlash('danger', $e->getMessage()); }
+    return '';
+}
+function panelica_DeleteBackup(array $params)
+{
+    try {
+        $api = panelica_getApi($params);
+        $file = isset($_POST['filename']) ? trim($_POST['filename']) : '';
+        if ($file === '') { throw new Exception('Missing backup filename.'); }
+        $api->deleteBackup($file);
+        panelica_setFlash('success', 'Backup deleted.');
+    } catch (Exception $e) { panelica_setFlash('danger', $e->getMessage()); }
+    return '';
+}
+
+/* ---------------- File manager ---------------- */
+function panelica_FmMkdir(array $params)
+{
+    try {
+        $api = panelica_getApi($params);
+        $account = panelica_requireAccount($api, $params);
+        $path = isset($_POST['fm_path']) ? trim($_POST['fm_path']) : '';
+        $name = isset($_POST['fm_name']) ? trim($_POST['fm_name']) : '';
+        if ($path === '' || $name === '') { throw new Exception('Folder name is required.'); }
+        $api->createFile($account['id'], $path, $name, 'folder');
+        panelica_setFlash('success', 'Folder created.');
+    } catch (Exception $e) { panelica_setFlash('danger', $e->getMessage()); }
+    return '';
+}
+function panelica_FmNewFile(array $params)
+{
+    try {
+        $api = panelica_getApi($params);
+        $account = panelica_requireAccount($api, $params);
+        $path = isset($_POST['fm_path']) ? trim($_POST['fm_path']) : '';
+        $name = isset($_POST['fm_name']) ? trim($_POST['fm_name']) : '';
+        if ($path === '' || $name === '') { throw new Exception('File name is required.'); }
+        $api->createFile($account['id'], $path, $name, 'file');
+        panelica_setFlash('success', 'File created.');
+    } catch (Exception $e) { panelica_setFlash('danger', $e->getMessage()); }
+    return '';
+}
+function panelica_FmSave(array $params)
+{
+    try {
+        $api = panelica_getApi($params);
+        $account = panelica_requireAccount($api, $params);
+        $path = isset($_POST['fm_file']) ? trim($_POST['fm_file']) : '';
+        $content = isset($_POST['fm_content']) ? (string) $_POST['fm_content'] : '';
+        if ($path === '') { throw new Exception('Missing file path.'); }
+        $api->writeFileContent($account['id'], $path, $content);
+        panelica_setFlash('success', 'File saved.');
+    } catch (Exception $e) { panelica_setFlash('danger', $e->getMessage()); }
+    return '';
+}
+function panelica_FmDelete(array $params)
+{
+    try {
+        $api = panelica_getApi($params);
+        $account = panelica_requireAccount($api, $params);
+        $path = isset($_POST['fm_target']) ? trim($_POST['fm_target']) : '';
+        if ($path === '') { throw new Exception('Missing target path.'); }
+        $api->deleteFiles($account['id'], array($path), false);
+        panelica_setFlash('success', 'Deleted (moved to trash).');
+    } catch (Exception $e) { panelica_setFlash('danger', $e->getMessage()); }
+    return '';
+}
+
+/**
+ * Universal client-area AJAX endpoint (list / create / delete / restore / ssl_issue).
+ * Powers lazy-loaded tabs so the product page renders instantly and each tab
+ * fetches its own data on demand. Returns JSON and exits. WHMCS session-protected.
+ */
+function panelica_Api(array $params)
+{
+    // Discard any page output WHMCS has buffered so our JSON is the only body
+    // (WHMCS buffers the full page on POST; without this the response is HTML).
+    while (ob_get_level() > 0) { @ob_end_clean(); }
+    header('Content-Type: application/json');
+    // Release the PHP session write-lock right away. WHMCS has already
+    // authenticated the client and verified service ownership before dispatching
+    // here, and this AJAX handler never writes to $_SESSION. Without this the 4+
+    // parallel requests the client area fires when a tab opens serialize behind
+    // the per-request session lock (each ~1-3s) — the Email pane took ~14s to
+    // finish. Closing the lock lets those requests run truly in parallel.
+    if (function_exists('session_write_close')) { @session_write_close(); }
+    try {
+        $api = panelica_getApi($params);
+        $account = panelica_requireAccount($api, $params);
+        $aid = $account['id'];
+        $dr = $api->listAccountDomains($aid);
+        $did = !empty($dr['data'][0]['id']) ? $dr['data'][0]['id'] : '';
+        $op = isset($_REQUEST['pnl_op']) ? $_REQUEST['pnl_op'] : 'list';
+        $tab = isset($_REQUEST['pnl_tab']) ? $_REQUEST['pnl_tab'] : '';
+        $P = function ($k, $d = '') { return isset($_POST[$k]) ? $_POST[$k] : $d; };
+
+        if ($op === 'delete') {
+            $id = $P('pnl_id'); // NOT "id" — WHMCS reads the service id from $_REQUEST['id'].
+            $map = array('email' => 'deleteEmail', 'forwarders' => 'deleteForwarder', 'autoresponders' => 'deleteAutoresponder',
+                'ftp' => 'deleteFtp', 'subdomains' => 'deleteSubdomain', 'dns' => 'deleteDnsRecord', 'cron' => 'deleteCron',
+                'redirects' => 'deleteRedirect', 'mysql' => 'deleteMysqlUser', 'backups' => 'deleteBackup');
+            if (!isset($map[$tab])) { throw new Exception('Unknown item type.'); }
+            // Ownership guard (IDOR): the module holds a root key, so the panel
+            // will happily delete ANY item by id — verify the id belongs to THIS
+            // account before deleting.
+            if ($tab === 'backups') {
+                // Backups are server-level: owned only if every contained domain
+                // is this account's (same guard as restore).
+                $acctDomains = panelica_acctDomainNames($dr);
+                $owned = false;
+                foreach (($api->listBackups()['data'] ?? array()) as $b) {
+                    if (($b['filename'] ?? $b['name'] ?? '') === $id) { $owned = panelica_backupOwnedByAccount($b, $acctDomains); break; }
+                }
+                if (!$owned) { throw new Exception('Backup not found.'); }
+            } else {
+                if ($id === '' || !in_array($id, panelica_ownedIds($api, $tab, $aid, $did), true)) {
+                    throw new Exception('Item not found.');
+                }
+            }
+            $m = $map[$tab]; $api->$m($id);
+            echo json_encode(array('ok' => true)); exit;
+        }
+        if ($op === 'dashboard') {
+            $stats = $api->getAccountStats($aid);
+            $disk = $api->getDiskUsage($aid);
+            $me = $api->me();
+            $scopes = isset($me['data']['scopes']) && is_array($me['data']['scopes']) ? $me['data']['scopes'] : array();
+            $caps = panelica_selfServiceCaps($scopes);
+            $usedMb = isset($disk['data']['used_mb']) ? (int) $disk['data']['used_mb'] : 0;
+            $quotaMb = isset($disk['data']['quota_mb']) ? (int) $disk['data']['quota_mb'] : 0;
+            $d0 = isset($dr['data'][0]) && is_array($dr['data'][0]) ? $dr['data'][0] : array();
+            $dname = !empty($d0['domain_name']) ? $d0['domain_name'] : (!empty($d0['name']) ? $d0['name'] : (!empty($d0['domain']) ? $d0['domain'] : ''));
+            echo json_encode(array('ok' => true, 'caps' => $caps, 'domain_name' => $dname,
+                'disk_used' => $usedMb, 'disk_quota' => panelica_formatMb($quotaMb),
+                'disk_pct' => ($quotaMb > 0 ? min(100, (int) round($usedMb * 100 / $quotaMb)) : 0),
+                'bandwidth' => isset($stats['data']['bandwidth_mb']) ? (int) $stats['data']['bandwidth_mb'] : 0,
+                'domain_count' => isset($stats['data']['domain_count']) ? (int) $stats['data']['domain_count'] : 0,
+                'email_count' => isset($stats['data']['email_count']) ? (int) $stats['data']['email_count'] : 0,
+                'database_count' => isset($stats['data']['database_count']) ? (int) $stats['data']['database_count'] : 0,
+                'ftp_count' => isset($stats['data']['ftp_count']) ? (int) $stats['data']['ftp_count'] : 0));
+            exit;
+        }
+        if ($op === 'restore') {
+            // Guard: only restore a backup that contains solely this account's
+            // domains. Restoring a server-wide backup would overwrite every
+            // account on the host — never allow that from the client area.
+            $fn = $P('pnl_id');
+            $acctDomains = panelica_acctDomainNames($dr);
+            $owned = false;
+            foreach (($api->listBackups()['data'] ?? array()) as $b) {
+                if (($b['filename'] ?? $b['name'] ?? '') === $fn) { $owned = panelica_backupOwnedByAccount($b, $acctDomains); break; }
+            }
+            if (!$owned) { throw new Exception('Backup not found.'); }
+            $api->restoreBackup($fn); echo json_encode(array('ok' => true)); exit;
+        }
+        if ($op === 'ssl_issue') { if ($did === '') { throw new Exception('No website yet.'); } $api->issueSsl($did); echo json_encode(array('ok' => true)); exit; }
+        if ($op === 'wp_login') {
+            $r = $api->wpAutoLogin($aid, $P('pnl_id'));
+            echo json_encode(array('ok' => true, 'url' => $r['data']['login_url'] ?? '')); exit;
+        }
+        if ($op === 'wp_plugins') {
+            $r = $api->wpUpdatePlugins($aid, $P('pnl_id'));
+            echo json_encode(array('ok' => true, 'msg' => $r['data']['result'] ?? 'Plugins updated.')); exit;
+        }
+        if ($op === 'wp_core') {
+            $api->wpUpdateCore($aid, $P('pnl_id'));
+            echo json_encode(array('ok' => true, 'msg' => 'WordPress core updated.')); exit;
+        }
+        if ($op === 'wp_backups') {
+            $r = $api->wpListBackups($aid, $P('pnl_id'));
+            echo json_encode(array('ok' => true, 'backups' => $r['data']['backups'] ?? array())); exit;
+        }
+        if ($op === 'wp_backup') {
+            $r = $api->wpCreateBackup($aid, $P('pnl_id'));
+            echo json_encode(array('ok' => true, 'msg' => 'Backup started.', 'backup' => $r['data']['backup'] ?? null)); exit;
+        }
+        if ($op === 'wp_restore') {
+            $api->wpRestoreBackup($aid, $P('pnl_id'), $P('backup_id'));
+            echo json_encode(array('ok' => true, 'msg' => 'Restore completed.')); exit;
+        }
+        if ($op === 'dkim_enable') {
+            if ($did === '') { throw new Exception('No website yet.'); }
+            $r = $api->enableDkim($did);
+            echo json_encode(array('ok' => true, 'msg' => 'DKIM signing enabled.', 'record' => $r['data'] ?? null)); exit;
+        }
+        if ($op === 'php_save') {
+            if ($did === '') { throw new Exception('No website yet.'); }
+            // Only the PHP VERSION is user-editable. Memory/exec/upload limits are
+            // governed by the hosting plan — we preserve the current values so the
+            // client can never raise them past their plan.
+            $cur = $api->getDomainPhp($did)['data'] ?? array();
+            $api->updateDomainPhp($did, array(
+                'php_version' => $P('php_version'),
+                'memory_limit' => isset($cur['memory_limit']) ? $cur['memory_limit'] : '',
+                'max_execution_time' => isset($cur['max_execution_time']) ? (int) $cur['max_execution_time'] : 0,
+                'upload_max_filesize' => isset($cur['upload_max_filesize']) ? $cur['upload_max_filesize'] : '',
+                'post_max_size' => isset($cur['post_max_size']) ? $cur['post_max_size'] : '',
+            ));
+            echo json_encode(array('ok' => true)); exit;
+        }
+
+        if ($op === 'create') {
+            if ($tab === 'email') { $api->createEmail($did, trim($P('email_user')), $P('email_pass'), (int) $P('email_quota', 0)); }
+            elseif ($tab === 'forwarders') { $api->createForwarder($did, trim($P('fwd_source')), trim($P('fwd_dest'))); }
+            elseif ($tab === 'autoresponders') { $api->createAutoresponder($did, $P('ar_email_id'), trim($P('ar_subject')), trim($P('ar_message'))); }
+            elseif ($tab === 'ftp') { $api->createFtp($aid, $did, trim($P('ftp_user')), $P('ftp_pass'), trim($P('ftp_dir'))); }
+            elseif ($tab === 'subdomains') { $api->createSubdomain($did, trim($P('sub_name'))); }
+            elseif ($tab === 'dns') { $api->createDnsRecord($did, strtoupper(trim($P('dns_type'))), trim($P('dns_name')), trim($P('dns_content')), (int) $P('dns_ttl', 3600)); }
+            elseif ($tab === 'cron') { $c = trim($P('cron_command')); if ($c === '') { throw new Exception('Command is required.'); } $api->createCron($did, $P('cron_name', 'cron'), $c, $P('cron_minute', '*'), $P('cron_hour', '*'), $P('cron_dom', '*'), $P('cron_month', '*'), $P('cron_dow', '*')); }
+            elseif ($tab === 'redirects') { $api->createRedirect($did, trim($P('rdr_source')), trim($P('rdr_dest')), $P('rdr_type', '301')); }
+            elseif ($tab === 'mysql') { $u = trim($P('db_user')); $pw = $P('db_pass'); if ($u === '' || strlen($pw) < 8) { throw new Exception('Username and 8+ char password required.'); } $api->createMysqlUser($did, $u, $pw); }
+            elseif ($tab === 'backups') {
+                // Scope the backup to THIS account's domains only. Passing an empty
+                // domain list makes the panel create a server-wide backup (all
+                // accounts) — a client must never be able to do that.
+                $bdids = array();
+                foreach (($dr['data'] ?? array()) as $d) { if (is_array($d) && !empty($d['id'])) { $bdids[] = $d['id']; } }
+                if (empty($bdids)) { throw new Exception('No domains available to back up.'); }
+                $api->createBackup($bdids, trim($P('backup_name')));
+            }
+            else { throw new Exception('Unknown item type.'); }
+            echo json_encode(array('ok' => true)); exit;
+        }
+
+        // op === 'list'
+        $rows = array(); $extra = array();
+        if ($tab === 'email') {
+            foreach (($api->listAccountEmails($aid)['data'] ?? array()) as $e) {
+                $addr = $e['email'] ?? $e['email_address'] ?? '—';
+                $rows[] = array('id' => $e['id'] ?? '', 'label' => $addr, 'cells' => array($addr, (($e['quota_mb'] ?? 0) > 0 ? ($e['quota_mb'] . ' MB') : 'Unlimited')));
+            }
+        } elseif ($tab === 'forwarders' && $did !== '') {
+            foreach (($api->listForwarders($did)['data'] ?? array()) as $f) {
+                $src = $f['source_email'] ?? $f['source'] ?? $f['source_address'] ?? '—';
+                $dst = (isset($f['destination_emails']) && is_array($f['destination_emails'])) ? implode(', ', $f['destination_emails']) : ($f['destination'] ?? '—');
+                $rows[] = array('id' => $f['id'] ?? '', 'cells' => array($src, $dst));
+            }
+        } elseif ($tab === 'autoresponders' && $did !== '') {
+            foreach (($api->listAutoresponders($did)['data'] ?? array()) as $a) {
+                // The mailbox address lives on the nested email_account object; the
+                // autoresponder row itself has no top-level "email" field.
+                $mbx = $a['email'] ?? $a['email_address'] ?? (isset($a['email_account']['email']) ? $a['email_account']['email'] : '—');
+                $rows[] = array('id' => $a['id'] ?? '', 'cells' => array($mbx, $a['subject'] ?? '—'));
+            }
+        } elseif ($tab === 'ftp') {
+            foreach (($api->listFtp()['data'] ?? array()) as $f) {
+                if ((isset($f['user_id']) && $f['user_id'] === $aid) || (isset($f['domain_id']) && $f['domain_id'] === $did)) {
+                    $rows[] = array('id' => $f['id'] ?? '', 'cells' => array($f['ftp_username'] ?? $f['username'] ?? '—', $f['directory'] ?? $f['home_directory'] ?? '/'));
+                }
+            }
+        } elseif ($tab === 'subdomains' && $did !== '') {
+            foreach (($api->listSubdomains($did)['data'] ?? array()) as $s) {
+                $rows[] = array('id' => $s['id'] ?? '', 'cells' => array($s['subdomain_name'] ?? $s['name'] ?? $s['fqdn'] ?? '—'));
+            }
+        } elseif ($tab === 'dns' && $did !== '') {
+            foreach (($api->listDnsRecords($did)['data'] ?? array()) as $r) {
+                $rows[] = array('id' => $r['id'] ?? '', 'cells' => array($r['type'] ?? '', $r['name'] ?? '', $r['content'] ?? '', (string) ($r['ttl'] ?? '')));
+            }
+        } elseif ($tab === 'cron') {
+            foreach (($api->listCron()['data'] ?? array()) as $j) {
+                if ((isset($j['user_id']) && $j['user_id'] === $aid) || (isset($j['domain_id']) && $j['domain_id'] === $did) || (!isset($j['user_id']) && !isset($j['domain_id']))) {
+                    $sched = ($j['minute'] ?? '*') . ' ' . ($j['hour'] ?? '*') . ' ' . ($j['day_of_month'] ?? '*') . ' ' . ($j['month'] ?? '*') . ' ' . ($j['day_of_week'] ?? '*');
+                    $rows[] = array('id' => $j['id'] ?? '', 'cells' => array($j['task_name'] ?? $j['name'] ?? '—', $j['command'] ?? '—', $sched));
+                }
+            }
+        } elseif ($tab === 'redirects' && $did !== '') {
+            foreach (($api->listRedirects($did)['data'] ?? array()) as $r) {
+                $rows[] = array('id' => $r['id'] ?? '', 'cells' => array($r['source_path'] ?? $r['source'] ?? '—', $r['destination_url'] ?? $r['destination'] ?? '—', $r['redirect_type'] ?? '301'));
+            }
+        } elseif ($tab === 'mysql') {
+            foreach (($api->listMysqlUsers()['data'] ?? array()) as $u) {
+                if ((isset($u['user_id']) && $u['user_id'] === $aid) || (isset($u['domain_id']) && $u['domain_id'] === $did) || (!isset($u['user_id']) && !isset($u['domain_id']))) {
+                    $rows[] = array('id' => $u['id'] ?? '', 'cells' => array($u['username'] ?? $u['name'] ?? '—'));
+                }
+            }
+        } elseif ($tab === 'backups') {
+            // Only show backups whose contents are limited to this account's own
+            // domains (hides server-wide + other accounts' backups).
+            $acctDomains = panelica_acctDomainNames($dr);
+            foreach (($api->listBackups()['data'] ?? array()) as $b) {
+                if (!panelica_backupOwnedByAccount($b, $acctDomains)) { continue; }
+                $fn = $b['filename'] ?? $b['name'] ?? '';
+                $sz = isset($b['size_mb']) ? panelica_formatMb((int) round($b['size_mb'])) : ($b['size_formatted'] ?? $b['size'] ?? '—');
+                $rows[] = array('id' => $fn, 'cells' => array($fn, $sz, $b['created_at'] ?? $b['date'] ?? ''));
+            }
+        } elseif ($tab === 'ssl' && $did !== '') {
+            $s = $api->getSsl($did)['data'] ?? array();
+            $extra['ssl'] = array('has_ssl' => !empty($s['has_ssl']), 'domain_name' => $s['domain_name'] ?? '');
+        } elseif ($tab === 'settings' && $did !== '') {
+            $extra['settings'] = array(
+                'php'      => $api->getDomainPhp($did)['data'] ?? array(),
+                'versions' => $api->listPhpVersions()['data'] ?? array(),
+            );
+        } elseif ($tab === 'wordpress') {
+            foreach (($api->listWordPress($aid)['data'] ?? array()) as $w) {
+                $rows[] = array('id' => $w['id'] ?? '', 'cells' => array(
+                    $w['site_url'] ?? $w['url'] ?? '—',
+                    $w['php_version'] ?? '—',
+                    $w['status'] ?? '—',
+                ));
+            }
+        } elseif ($tab === 'deliverability' && $did !== '') {
+            // Single round-trip: SPF + DKIM in one call (was 2 sequential calls).
+            $dv = $api->getDeliverability($did)['data'] ?? array();
+            $dk = isset($dv['dkim']) && is_array($dv['dkim']) ? $dv['dkim'] : array();
+            $sp = isset($dv['spf']) && is_array($dv['spf']) ? $dv['spf'] : array();
+            $dn = !empty($dv['domain_name']) ? $dv['domain_name'] : (isset($dr['data'][0]['domain_name']) ? $dr['data'][0]['domain_name'] : '');
+            $extra['deliverability'] = array(
+                'domain_name' => $dn,
+                'dkim' => array('enabled' => !empty($dk['enabled']), 'public_key' => isset($dk['public_key']) ? $dk['public_key'] : ''),
+                'spf'  => array('enabled' => !empty($sp['enabled']), 'record' => isset($sp['record']) ? $sp['record'] : ''),
+            );
+        }
+        echo json_encode(array('ok' => true, 'rows' => $rows) + $extra); exit;
+    } catch (Exception $e) {
+        echo json_encode(array('ok' => false, 'error' => $e->getMessage())); exit;
+    }
+}
+
+/**
+ * AJAX file-manager backend: returns JSON and exits (no full page reload).
+ * Protected by the WHMCS client session (the customer must own this service).
+ * ops: list | read | mkdir | newfile | save | delete
+ */
+function panelica_FmAjax(array $params)
+{
+    while (ob_get_level() > 0) { @ob_end_clean(); }
+    header('Content-Type: application/json');
+    // Release the session write-lock so concurrent file-manager requests don't
+    // serialize behind it (see panelica_Api for the full rationale).
+    if (function_exists('session_write_close')) { @session_write_close(); }
+    try {
+        $api = panelica_getApi($params);
+        $account = panelica_requireAccount($api, $params);
+        $uid = $account['id'];
+
+        // Resolve + enforce the accessible root — never operate outside it.
+        $adr = $api->accessibleDirectories($uid);
+        $roots = isset($adr['data']['directories']) && is_array($adr['data']['directories']) ? $adr['data']['directories'] : array();
+        $root = !empty($roots[0]) ? rtrim($roots[0], '/') : '';
+        $confine = function ($path) use ($root) {
+            $path = (string) $path;
+            if ($root !== '' && strpos($path, $root) !== 0) {
+                return $root;
+            }
+            return rtrim($path, '/') !== '' ? rtrim($path, '/') : $root;
+        };
+
+        $op = isset($_REQUEST['fm_op']) ? $_REQUEST['fm_op'] : 'list';
+
+        if ($op === 'list') {
+            $path = $confine(isset($_REQUEST['fm_path']) ? $_REQUEST['fm_path'] : $root);
+            $flr = $api->listFiles($uid, $path);
+            $files = isset($flr['data']['files']) && is_array($flr['data']['files']) ? $flr['data']['files'] : array();
+            $parent = ($path !== $root && strrpos($path, '/') !== false) ? substr($path, 0, strrpos($path, '/')) : '';
+            if ($parent !== '' && $root !== '' && strpos($parent, $root) !== 0) { $parent = $root; }
+            $crumbs = array();
+            if ($root !== '' && strpos($path, $root) === 0) {
+                $acc = $root; $crumbs[] = array('name' => basename($root), 'path' => $root);
+                $rel = trim(substr($path, strlen($root)), '/');
+                if ($rel !== '') { foreach (explode('/', $rel) as $seg) { $acc .= '/' . $seg; $crumbs[] = array('name' => $seg, 'path' => $acc); } }
+            }
+            echo json_encode(array('ok' => true, 'root' => $root, 'path' => $path, 'parent' => $parent, 'crumbs' => $crumbs, 'files' => $files));
+        } elseif ($op === 'read') {
+            $path = $confine(isset($_REQUEST['fm_path']) ? $_REQUEST['fm_path'] : '');
+            $cr = $api->readFileContent($uid, $path);
+            echo json_encode(array('ok' => true, 'path' => $path, 'content' => isset($cr['data']['content']) ? $cr['data']['content'] : ''));
+        } elseif ($op === 'mkdir' || $op === 'newfile') {
+            $path = $confine(isset($_POST['fm_path']) ? $_POST['fm_path'] : $root);
+            $name = isset($_POST['fm_name']) ? trim($_POST['fm_name']) : '';
+            if ($name === '') { throw new Exception('Name is required.'); }
+            $api->createFile($uid, $path, $name, $op === 'mkdir' ? 'folder' : 'file');
+            echo json_encode(array('ok' => true));
+        } elseif ($op === 'save') {
+            $path = $confine(isset($_POST['fm_file']) ? $_POST['fm_file'] : '');
+            $content = isset($_POST['fm_content']) ? (string) $_POST['fm_content'] : '';
+            $api->writeFileContent($uid, $path, $content);
+            echo json_encode(array('ok' => true));
+        } elseif ($op === 'delete') {
+            $path = $confine(isset($_POST['fm_target']) ? $_POST['fm_target'] : '');
+            if ($path === $root) { throw new Exception('Cannot delete the root directory.'); }
+            $api->deleteFiles($uid, array($path), false);
+            echo json_encode(array('ok' => true));
+        } else {
+            echo json_encode(array('ok' => false, 'error' => 'Unknown operation.'));
+        }
+    } catch (Exception $e) {
+        echo json_encode(array('ok' => false, 'error' => $e->getMessage()));
+    }
+    exit;
 }
 
 /**
