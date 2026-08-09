@@ -620,7 +620,17 @@ function panelica_managedPlanSpec(array $params)
 
     // Stable content hash: same options -> same plan version (reused);
     // any change -> new slug -> real plan switch -> kernel re-applies limits.
-    $hash = substr(md5(json_encode(array($basic, $advanced))), 0, 8);
+    //
+    // Sorted first, because the hash has to describe what the plan is and
+    // nothing else. An override typed in the advanced box is appended in the
+    // order its line appears, so without this the same settings listed in a
+    // different order fingerprinted differently: every product edit that
+    // reordered those lines invented a plan version identical to the one
+    // already there and moved every account of the product onto it.
+    $forHash = array($basic, $advanced);
+    ksort($forHash[0]);
+    ksort($forHash[1]);
+    $hash = substr(md5(json_encode($forHash)), 0, 8);
 
     return array('basic' => $basic, 'advanced' => $advanced, 'hash' => $hash);
 }

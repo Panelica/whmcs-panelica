@@ -353,4 +353,91 @@ final class LiveLifecycleTest extends TestCase
 
         panelica_TerminateAccount($params);
     }
+
+    /**
+     * Managed mode, which builds the plan on the panel from the product's own
+     * options. It is the module's biggest moving part and had no coverage at
+     * all: it creates a plan, sets the cgroup limits in a second call, and then
+     * verifies they landed - a verification that fails the whole provisioning
+     * if the panel does not report them back.
+     */
+    public function testAManagedPlanIsBuiltOnThePanelAndReusedNotDuplicated(): void
+    {
+        $params = $this->params([
+            'packageid' => 990001,
+            'packagename' => 'Module Test Managed',
+            'configoption1' => PANELICA_MANAGED_PLAN,
+            'configoption2' => '2048',
+            'configoption3' => '20480',
+            'configoption4' => '25',
+            'configoption5' => '512',
+            'configoption6' => '40',
+        ]);
+
+        $api = self::api();
+        $planId = panelica_ensureManagedPlan($api, $params);
+
+        try {
+            $this->assertNotSame('', $planId);
+
+            // Asked again for the same product and options: the same plan, not
+            // a second copy of it.
+            $this->assertSame($planId, panelica_ensureManagedPlan($api, $params));
+
+            $spec = panelica_managedPlanSpec($params);
+            $plan = $api->findPlanBySlug('whmcs-p990001-' . $spec['hash']);
+
+            $this->assertNotNull($plan);
+            $this->assertSame(25, (int) $plan['cpu_limit_percent'], 'the kernel CPU limit did not land');
+            $this->assertSame(512, (int) $plan['memory_limit_mb'], 'the memory limit did not land');
+            $this->assertSame(40, (int) $plan['process_limit'], 'the process limit did not land');
+        } finally {
+            try {
+                $api->deletePlan($planId);
+            } catch (Exception $e) {
+                fwrite(STDERR, "\nleft behind on the panel: plan {$planId}\n");
+            }
+        }
+    }
+
+    public function testThePanelRefusesToRemoveAPlanAnAccountIsStillOn(): void
+    {
+        $params = $this->params([
+            'packageid' => 990002,
+            'packagename' => 'Module Test Managed In Use',
+            'configoption1' => PANELICA_MANAGED_PLAN,
+            'configoption2' => '1024',
+        ]);
+
+        $api = self::api();
+        $planId = panelica_ensureManagedPlan($api, $params);
+        $username = $this->freshUsername();
+
+        try {
+            $this->assertSame('success', panelica_CreateAccount($this->params([
+                'username' => $username,
+                'password' => 'Str0ng!Pass-2026',
+                'configoption1' => $planId,
+            ])));
+
+            // The garbage collector leans on this: it asks the panel to remove
+            // superseded versions and treats a refusal as "still in use".
+            try {
+                $api->deletePlan($planId);
+                $this->fail('the panel removed a plan an account was still on');
+            } catch (Exception $e) {
+                $this->addToAssertionCount(1);
+            }
+
+            $this->assertNotNull($this->accountOf($username), 'the account went with the plan');
+        } finally {
+            panelica_TerminateAccount($this->params(['username' => $username]));
+
+            try {
+                $api->deletePlan($planId);
+            } catch (Exception $e) {
+                fwrite(STDERR, "\nleft behind on the panel: plan {$planId}\n");
+            }
+        }
+    }
 }
