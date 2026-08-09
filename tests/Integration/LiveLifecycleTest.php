@@ -287,4 +287,70 @@ final class LiveLifecycleTest extends TestCase
 
         $this->assertSame([], panelica_missingScopes($granted), 'the panel key is missing scopes the module uses');
     }
+
+    /**
+     * The guard added to the form-post deletes asks the panel for the account's
+     * own items before it lets a delete through. If any of those listings does
+     * not answer on a real panel, every delete in the client area breaks - so
+     * this walks the whole set against the live server.
+     */
+    public function testTheOwnershipGuardCanAskThePanelAboutEveryTab(): void
+    {
+        $username = $this->freshUsername();
+        $params = $this->params(['username' => $username, 'password' => 'Str0ng!Pass-2026']);
+
+        $this->assertSame('success', panelica_CreateAccount($params));
+
+        $api = self::api();
+        $account = $this->accountOf($username);
+        $domains = $api->listAccountDomains($account['id']);
+        $domainId = (string) ($domains['data'][0]['id'] ?? '');
+
+        foreach (array_keys(panelica_deletableTabs()) as $tab) {
+            if ($tab === 'backups') {
+                continue; // backups have their own guard, exercised below
+            }
+
+            $owned = panelica_ownedIds($api, $tab, $account['id'], $domainId);
+
+            $this->assertIsArray($owned, "the panel would not answer for the {$tab} tab");
+            $this->assertNotContains('', $owned);
+        }
+
+        panelica_TerminateAccount($params);
+    }
+
+    public function testAnItemThisAccountDoesNotOwnIsRefusedAgainstTheRealPanel(): void
+    {
+        $username = $this->freshUsername();
+        $params = $this->params(['username' => $username, 'password' => 'Str0ng!Pass-2026']);
+
+        $this->assertSame('success', panelica_CreateAccount($params));
+
+        try {
+            panelica_deleteOwnedItem(self::api(), $params, 'cron', '00000000-0000-4000-8000-000000000000');
+            $this->fail('an id this account does not own was passed to the panel');
+        } catch (Exception $e) {
+            $this->assertStringContainsString('not found', strtolower($e->getMessage()));
+        }
+
+        panelica_TerminateAccount($params);
+    }
+
+    public function testABackupThisAccountDoesNotOwnIsRefusedAgainstTheRealPanel(): void
+    {
+        $username = $this->freshUsername();
+        $params = $this->params(['username' => $username, 'password' => 'Str0ng!Pass-2026']);
+
+        $this->assertSame('success', panelica_CreateAccount($params));
+
+        try {
+            panelica_requireOwnedBackup(self::api(), $params, 'someone-elses-backup.tar.gz');
+            $this->fail('a backup this account does not own was accepted');
+        } catch (Exception $e) {
+            $this->assertStringContainsString('not found', strtolower($e->getMessage()));
+        }
+
+        panelica_TerminateAccount($params);
+    }
 }

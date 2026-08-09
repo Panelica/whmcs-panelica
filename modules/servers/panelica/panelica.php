@@ -1193,6 +1193,97 @@ function panelica_takeFlash()
     return null;
 }
 
+/**
+ * The client-area tabs whose items can be removed, and the call that removes
+ * one. Shared so the two doors onto the same operation - the AJAX endpoint and
+ * the form-post handlers - cannot drift apart.
+ *
+ * @return array<string, string> tab => PanelicaAPI method
+ */
+function panelica_deletableTabs()
+{
+    return array(
+        'email' => 'deleteEmail', 'forwarders' => 'deleteForwarder', 'autoresponders' => 'deleteAutoresponder',
+        'ftp' => 'deleteFtp', 'subdomains' => 'deleteSubdomain', 'dns' => 'deleteDnsRecord', 'cron' => 'deleteCron',
+        'redirects' => 'deleteRedirect', 'mysql' => 'deleteMysqlUser', 'backups' => 'deleteBackup',
+    );
+}
+
+/**
+ * Remove one item, but only if this account owns it.
+ *
+ * The module signs with a server-wide key, so the panel deletes whatever id it
+ * is given: nothing on the panel side narrows the call down to one customer.
+ * The AJAX endpoint has always checked ownership first; the form-post handlers
+ * took the id straight from the request and passed it on, which let a customer
+ * holding an id from another account delete that account's mailbox, cron job,
+ * database user, DNS record or FTP login. Both doors now ask the same question.
+ *
+ * @throws Exception when the id is empty, the tab unknown, or the item is not
+ *                   this account's
+ */
+function panelica_deleteOwnedItem(PanelicaAPI $api, array $params, $tab, $id)
+{
+    $map = panelica_deletableTabs();
+
+    if (!isset($map[$tab])) {
+        throw new Exception('Unknown item type.');
+    }
+
+    $id = trim((string) $id);
+
+    if ($id === '') {
+        throw new Exception('Item not found.');
+    }
+
+    list($account, $domainId) = panelica_ctx($api, $params);
+
+    if (!in_array($id, panelica_ownedIds($api, $tab, $account['id'], $domainId), true)) {
+        // Deliberately the same wording as a missing item: whether an id exists
+        // on the panel is not this customer's business.
+        throw new Exception('Item not found.');
+    }
+
+    $method = $map[$tab];
+
+    return $api->$method($id);
+}
+
+/**
+ * Confirm a backup belongs to this account before restoring or deleting it.
+ *
+ * Backups are server-level, so the same reasoning applies as above, with the
+ * rule panelica_backupOwnedByAccount states: every domain inside the archive
+ * has to be one of this account's, and unknown scope counts as not ours.
+ *
+ * @throws Exception when the backup is not this account's
+ */
+function panelica_requireOwnedBackup(PanelicaAPI $api, array $params, $filename)
+{
+    $filename = trim((string) $filename);
+
+    if ($filename === '') {
+        throw new Exception('Backup not found.');
+    }
+
+    $account = panelica_requireAccount($api, $params);
+    $acctDomains = panelica_acctDomainNames($api->listAccountDomains($account['id']));
+
+    foreach (($api->listBackups()['data'] ?? array()) as $backup) {
+        $name = isset($backup['filename']) ? $backup['filename'] : (isset($backup['name']) ? $backup['name'] : '');
+
+        if ($name === $filename) {
+            if (panelica_backupOwnedByAccount($backup, $acctDomains)) {
+                return true;
+            }
+
+            break;
+        }
+    }
+
+    throw new Exception('Backup not found.');
+}
+
 /** Resolve the account + its primary domain id for a self-service action. */
 function panelica_ctx(PanelicaAPI $api, array $params)
 {
@@ -1236,7 +1327,7 @@ function panelica_DeleteEmail(array $params)
         if ($id === '') {
             throw new Exception('Missing email id.');
         }
-        $api->deleteEmail($id);
+        panelica_deleteOwnedItem($api, $params, 'email', $id);
         panelica_setFlash('success', 'Email account deleted.');
     } catch (Exception $e) {
         panelica_setFlash('danger', $e->getMessage());
@@ -1277,7 +1368,7 @@ function panelica_DeleteFtp(array $params)
         if ($id === '') {
             throw new Exception('Missing FTP id.');
         }
-        $api->deleteFtp($id);
+        panelica_deleteOwnedItem($api, $params, 'ftp', $id);
         panelica_setFlash('success', 'FTP account deleted.');
     } catch (Exception $e) {
         panelica_setFlash('danger', $e->getMessage());
@@ -1313,7 +1404,7 @@ function panelica_DeleteSubdomain(array $params)
         if ($id === '') {
             throw new Exception('Missing subdomain id.');
         }
-        $api->deleteSubdomain($id);
+        panelica_deleteOwnedItem($api, $params, 'subdomains', $id);
         panelica_setFlash('success', 'Subdomain deleted.');
     } catch (Exception $e) {
         panelica_setFlash('danger', $e->getMessage());
@@ -1355,7 +1446,7 @@ function panelica_DeleteDnsRecord(array $params)
         if ($id === '') {
             throw new Exception('Missing DNS record id.');
         }
-        $api->deleteDnsRecord($id);
+        panelica_deleteOwnedItem($api, $params, 'dns', $id);
         panelica_setFlash('success', 'DNS record deleted.');
     } catch (Exception $e) {
         panelica_setFlash('danger', $e->getMessage());
@@ -1400,7 +1491,7 @@ function panelica_DeleteCron(array $params)
         if ($id === '') {
             throw new Exception('Missing cron job id.');
         }
-        $api->deleteCron($id);
+        panelica_deleteOwnedItem($api, $params, 'cron', $id);
         panelica_setFlash('success', 'Cron job deleted.');
     } catch (Exception $e) {
         panelica_setFlash('danger', $e->getMessage());
@@ -1448,7 +1539,7 @@ function panelica_DeleteForwarder(array $params)
         $api = panelica_getApi($params);
         $id = isset($_POST['id']) ? trim($_POST['id']) : (isset($_GET['id']) ? trim($_GET['id']) : '');
         if ($id === '') { throw new Exception('Missing forwarder id.'); }
-        $api->deleteForwarder($id);
+        panelica_deleteOwnedItem($api, $params, 'forwarders', $id);
         panelica_setFlash('success', 'Forwarder deleted.');
     } catch (Exception $e) { panelica_setFlash('danger', $e->getMessage()); }
     return '';
@@ -1476,7 +1567,7 @@ function panelica_DeleteAutoresponder(array $params)
         $api = panelica_getApi($params);
         $id = isset($_POST['id']) ? trim($_POST['id']) : (isset($_GET['id']) ? trim($_GET['id']) : '');
         if ($id === '') { throw new Exception('Missing autoresponder id.'); }
-        $api->deleteAutoresponder($id);
+        panelica_deleteOwnedItem($api, $params, 'autoresponders', $id);
         panelica_setFlash('success', 'Autoresponder deleted.');
     } catch (Exception $e) { panelica_setFlash('danger', $e->getMessage()); }
     return '';
@@ -1503,7 +1594,7 @@ function panelica_DeleteMysqlUser(array $params)
         $api = panelica_getApi($params);
         $id = isset($_POST['id']) ? trim($_POST['id']) : (isset($_GET['id']) ? trim($_GET['id']) : '');
         if ($id === '') { throw new Exception('Missing database user id.'); }
-        $api->deleteMysqlUser($id);
+        panelica_deleteOwnedItem($api, $params, 'mysql', $id);
         panelica_setFlash('success', 'Database user deleted.');
     } catch (Exception $e) { panelica_setFlash('danger', $e->getMessage()); }
     return '';
@@ -1531,7 +1622,7 @@ function panelica_DeleteRedirect(array $params)
         $api = panelica_getApi($params);
         $id = isset($_POST['id']) ? trim($_POST['id']) : (isset($_GET['id']) ? trim($_GET['id']) : '');
         if ($id === '') { throw new Exception('Missing redirect id.'); }
-        $api->deleteRedirect($id);
+        panelica_deleteOwnedItem($api, $params, 'redirects', $id);
         panelica_setFlash('success', 'Redirect deleted.');
     } catch (Exception $e) { panelica_setFlash('danger', $e->getMessage()); }
     return '';
@@ -1555,6 +1646,7 @@ function panelica_RestoreBackup(array $params)
         $api = panelica_getApi($params);
         $file = isset($_POST['filename']) ? trim($_POST['filename']) : '';
         if ($file === '') { throw new Exception('Missing backup filename.'); }
+        panelica_requireOwnedBackup($api, $params, $file);
         $api->restoreBackup($file);
         panelica_setFlash('success', 'Restore started — it runs in the background.');
     } catch (Exception $e) { panelica_setFlash('danger', $e->getMessage()); }
@@ -1566,6 +1658,7 @@ function panelica_DeleteBackup(array $params)
         $api = panelica_getApi($params);
         $file = isset($_POST['filename']) ? trim($_POST['filename']) : '';
         if ($file === '') { throw new Exception('Missing backup filename.'); }
+        panelica_requireOwnedBackup($api, $params, $file);
         $api->deleteBackup($file);
         panelica_setFlash('success', 'Backup deleted.');
     } catch (Exception $e) { panelica_setFlash('danger', $e->getMessage()); }
@@ -1655,9 +1748,7 @@ function panelica_Api(array $params)
 
         if ($op === 'delete') {
             $id = $P('pnl_id'); // NOT "id" — WHMCS reads the service id from $_REQUEST['id'].
-            $map = array('email' => 'deleteEmail', 'forwarders' => 'deleteForwarder', 'autoresponders' => 'deleteAutoresponder',
-                'ftp' => 'deleteFtp', 'subdomains' => 'deleteSubdomain', 'dns' => 'deleteDnsRecord', 'cron' => 'deleteCron',
-                'redirects' => 'deleteRedirect', 'mysql' => 'deleteMysqlUser', 'backups' => 'deleteBackup');
+            $map = panelica_deletableTabs();
             if (!isset($map[$tab])) { throw new Exception('Unknown item type.'); }
             // Ownership guard (IDOR): the module holds a root key, so the panel
             // will happily delete ANY item by id — verify the id belongs to THIS
