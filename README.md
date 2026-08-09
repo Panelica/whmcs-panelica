@@ -206,3 +206,26 @@ Advanced Overrides — is applied and kernel-verified on both create and change.
   call is logged with credentials masked.
 - **License:** if the panel reports API access unavailable, the Panelica
   license on that server does not include the API Access feature.
+
+## Tests
+
+    composer install
+    composer test                       # offline suite, talks to nothing
+
+The offline suite covers request signing, the self-signed certificate retry,
+error handling, ownership scoping and the usage sync, with WHMCS itself
+doubled — no panel and no WHMCS installation needed.
+
+A second suite drives the module's real lifecycle against a panel. Point it at
+a **test** server, never one with customers on it: it creates accounts, moves
+them between plans and deletes them again.
+
+    PANELICA_TEST_HOST=panel.example.com \
+    PANELICA_TEST_KEY=pk_live_... \
+    PANELICA_TEST_SECRET=sk_live_... \
+    vendor/bin/phpunit --testsuite integration
+
+Optional: `PANELICA_TEST_PORT` (default 8443) and `PANELICA_TEST_PLAN` (a plan
+UUID; otherwise the first plan on the panel is used). Every account it creates
+carries a `wmt` prefix and is removed at the end, including after a failure.
+Without those variables the suite skips itself.

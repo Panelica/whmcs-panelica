@@ -6,8 +6,14 @@
          failOnWarning="true"
          failOnRisky="true">
     <testsuites>
-        <testsuite name="module">
+        <!-- Runs anywhere, talks to nothing. -->
+        <testsuite name="unit">
             <directory>tests</directory>
+            <exclude>tests/Integration</exclude>
+        </testsuite>
+        <!-- Needs a panel: see tests/Integration/LiveLifecycleTest.php. -->
+        <testsuite name="integration">
+            <directory>tests/Integration</directory>
         </testsuite>
     </testsuites>
 </phpunit>

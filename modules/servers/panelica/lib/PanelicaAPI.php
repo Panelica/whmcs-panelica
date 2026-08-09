@@ -840,7 +840,13 @@ if (!class_exists('PanelicaAPI')) {
             $curlErrNo = curl_errno($ch);
             $curlErr = curl_error($ch);
             $httpStatus = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
-            curl_close($ch);
+
+            // A no-op since PHP 8.0 and deprecated in 8.5, where calling it
+            // puts a notice in the WHMCS log for every request the module
+            // makes. The handle is released when it goes out of scope.
+            if (PHP_VERSION_ID < 80000) {
+                curl_close($ch);
+            }
 
             return array($httpStatus, ($raw === false ? '' : $raw), $curlErrNo, $curlErr);
         }
