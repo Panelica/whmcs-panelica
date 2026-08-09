@@ -1328,6 +1328,36 @@ function panelica_confinePath($path, $root)
     return $path;
 }
 
+/**
+ * Confirm a mailbox belongs to this account before something is attached to it.
+ *
+ * The autoresponder doors take the domain from the account's own context but
+ * the mailbox id from the request, and the panel only checks that the caller
+ * may reach the domain in the URL - which is always true of the administrator
+ * key the module signs with. Without this, a customer could point an
+ * autoresponder at somebody else's mailbox and have that address reply to its
+ * senders with text they wrote.
+ *
+ * @return string the mailbox id, once it is known to be this account's
+ * @throws Exception when it is not
+ */
+function panelica_requireOwnedMailbox(PanelicaAPI $api, array $params, $emailId)
+{
+    $emailId = trim((string) $emailId);
+
+    if ($emailId === '') {
+        throw new Exception('Email account not found.');
+    }
+
+    list($account, $domainId) = panelica_ctx($api, $params);
+
+    if (!in_array($emailId, panelica_ownedIds($api, 'email', $account['id'], $domainId), true)) {
+        throw new Exception('Email account not found.');
+    }
+
+    return $emailId;
+}
+
 /** Resolve the account + its primary domain id for a self-service action. */
 function panelica_ctx(PanelicaAPI $api, array $params)
 {
@@ -1600,6 +1630,7 @@ function panelica_CreateAutoresponder(array $params)
         $subject = isset($_POST['ar_subject']) ? trim($_POST['ar_subject']) : '';
         $message = isset($_POST['ar_message']) ? trim($_POST['ar_message']) : '';
         if ($emailId === '' || $subject === '' || $message === '') { throw new Exception('Email account, subject and message are required.'); }
+        panelica_requireOwnedMailbox($api, $params, $emailId);
         $api->createAutoresponder($domainId, $emailId, $subject, $message);
         panelica_setFlash('success', 'Autoresponder created.');
     } catch (Exception $e) { panelica_setFlash('danger', $e->getMessage()); }
@@ -1896,7 +1927,7 @@ function panelica_Api(array $params)
         if ($op === 'create') {
             if ($tab === 'email') { $api->createEmail($did, trim($P('email_user')), $P('email_pass'), (int) $P('email_quota', 0)); }
             elseif ($tab === 'forwarders') { $api->createForwarder($did, trim($P('fwd_source')), trim($P('fwd_dest'))); }
-            elseif ($tab === 'autoresponders') { $api->createAutoresponder($did, $P('ar_email_id'), trim($P('ar_subject')), trim($P('ar_message'))); }
+            elseif ($tab === 'autoresponders') { $api->createAutoresponder($did, panelica_requireOwnedMailbox($api, $params, $P('ar_email_id')), trim($P('ar_subject')), trim($P('ar_message'))); }
             elseif ($tab === 'ftp') { $api->createFtp($aid, $did, trim($P('ftp_user')), $P('ftp_pass'), trim($P('ftp_dir'))); }
             elseif ($tab === 'subdomains') { $api->createSubdomain($did, trim($P('sub_name'))); }
             elseif ($tab === 'dns') { $api->createDnsRecord($did, strtoupper(trim($P('dns_type'))), trim($P('dns_name')), trim($P('dns_content')), (int) $P('dns_ttl', 3600)); }
