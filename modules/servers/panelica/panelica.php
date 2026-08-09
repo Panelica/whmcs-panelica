@@ -1284,6 +1284,50 @@ function panelica_requireOwnedBackup(PanelicaAPI $api, array $params, $filename)
     throw new Exception('Backup not found.');
 }
 
+/**
+ * Keep a file-manager path inside the account's own directory.
+ *
+ * The panel refuses to leave an account's home on its own - a listing above it
+ * comes back 403 - so this is the module's second line, not the only one. It
+ * still has to hold: without a known root there is nothing to measure against,
+ * so nothing is accepted; a path that merely starts with the root's characters
+ * is not inside it (/home/bob does not contain /home/bobby); and a walk-up is
+ * refused rather than passed on for somebody else to catch.
+ *
+ * @param string $path what the request asked for
+ * @param string $root the account's accessible directory
+ * @return string a path inside the root - the root itself when the request was
+ *                not
+ * @throws Exception when there is no root to confine against
+ */
+function panelica_confinePath($path, $root)
+{
+    $root = rtrim((string) $root, '/');
+
+    if ($root === '') {
+        throw new Exception('The account has no accessible directory on this server.');
+    }
+
+    $path = rtrim(trim((string) $path), '/');
+
+    if ($path === '') {
+        return $root;
+    }
+
+    // A ".." as a whole segment walks out; ".." inside a name does not.
+    foreach (explode('/', $path) as $segment) {
+        if ($segment === '..') {
+            return $root;
+        }
+    }
+
+    if ($path !== $root && strpos($path, $root . '/') !== 0) {
+        return $root;
+    }
+
+    return $path;
+}
+
 /** Resolve the account + its primary domain id for a self-service action. */
 function panelica_ctx(PanelicaAPI $api, array $params)
 {
@@ -1989,11 +2033,7 @@ function panelica_FmAjax(array $params)
         $roots = isset($adr['data']['directories']) && is_array($adr['data']['directories']) ? $adr['data']['directories'] : array();
         $root = !empty($roots[0]) ? rtrim($roots[0], '/') : '';
         $confine = function ($path) use ($root) {
-            $path = (string) $path;
-            if ($root !== '' && strpos($path, $root) !== 0) {
-                return $root;
-            }
-            return rtrim($path, '/') !== '' ? rtrim($path, '/') : $root;
+            return panelica_confinePath($path, $root);
         };
 
         $op = isset($_REQUEST['fm_op']) ? $_REQUEST['fm_op'] : 'list';
