@@ -1,2 +1,5 @@
 *.log
 scratch/
+/vendor/
+/composer.lock
+/.phpunit.cache/

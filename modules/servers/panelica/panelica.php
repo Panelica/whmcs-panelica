@@ -494,16 +494,23 @@ function panelica_ownedIds(PanelicaAPI $api, $tab, $aid, $did)
                 }
             }
             break;
+        // Cron and MySQL used to treat an item carrying neither an owner nor a
+        // domain as belonging to whoever was asking. That is the opposite of
+        // the rule stated for backups a few lines up, and of what the FTP
+        // branch does: a resource this account cannot be shown to own is not
+        // one it may delete. Today's panel always sends both fields, so the
+        // permissive branch bought nothing and would have turned any future
+        // response that omitted them into a cross-account delete.
         case 'cron':
             foreach (($api->listCron()['data'] ?? array()) as $j) {
-                if ((isset($j['user_id']) && $j['user_id'] === $aid) || (isset($j['domain_id']) && $j['domain_id'] === $did) || (!isset($j['user_id']) && !isset($j['domain_id']))) {
+                if ((isset($j['user_id']) && $j['user_id'] === $aid) || (isset($j['domain_id']) && $j['domain_id'] === $did)) {
                     if (!empty($j['id'])) { $ids[] = $j['id']; }
                 }
             }
             break;
         case 'mysql':
             foreach (($api->listMysqlUsers()['data'] ?? array()) as $u) {
-                if ((isset($u['user_id']) && $u['user_id'] === $aid) || (isset($u['domain_id']) && $u['domain_id'] === $did) || (!isset($u['user_id']) && !isset($u['domain_id']))) {
+                if ((isset($u['user_id']) && $u['user_id'] === $aid) || (isset($u['domain_id']) && $u['domain_id'] === $did)) {
                     if (!empty($u['id'])) { $ids[] = $u['id']; }
                 }
             }
@@ -1949,8 +1956,27 @@ function panelica_FmAjax(array $params)
 function panelica_UsageUpdate(array $params)
 {
     try {
-        $api = panelica_getApi($params);
+        return panelica_usageUpdateWith(panelica_getApi($params), isset($params['serverid']) ? $params['serverid'] : 0);
+    } catch (Exception $e) {
+        panelica_log(__FUNCTION__, $params, $e->getMessage());
+        return $e->getMessage();
+    }
+}
 
+/**
+ * The work behind panelica_UsageUpdate, with the API client handed in.
+ *
+ * Kept separate so the sync can be exercised against a stubbed panel: this is
+ * the one job that writes to every service row on the server, and a mistake
+ * here is silent.
+ *
+ * @param PanelicaAPI $api      talking to the panel
+ * @param int|string  $serverId WHMCS server id whose services are synced
+ * @return string 'success' or an error message for WHMCS
+ */
+function panelica_usageUpdateWith(PanelicaAPI $api, $serverId)
+{
+    try {
         // Map plan UUID -> monthly bandwidth quota (for bwlimit).
         $planBwMb = array();
         try {
@@ -1974,7 +2000,7 @@ function panelica_UsageUpdate(array $params)
         }
 
         $services = Capsule::table('tblhosting')
-            ->where('server', $params['serverid'])
+            ->where('server', $serverId)
             ->whereIn('domainstatus', array('Active', 'Suspended'))
             ->get(array('id', 'username'));
 
@@ -1986,7 +2012,11 @@ function panelica_UsageUpdate(array $params)
             }
             $account = $byUsername[$uname];
 
-            $row = array('lastupdate' => date('Y-m-d H:i:s'));
+            // Stamped only once there is something to stamp. WHMCS shows
+            // "last updated" on the service and an operator reads it as "these
+            // figures are from last night", so writing it after every call had
+            // failed dressed month-old numbers up as fresh ones.
+            $row = array();
 
             try {
                 $disk = $api->getDiskUsage($account['id']);
@@ -2011,14 +2041,19 @@ function panelica_UsageUpdate(array $params)
                 $row['bwlimit'] = $planBwMb[$account['plan_id']];
             }
 
+            if (empty($row)) {
+                continue;
+            }
+
+            $row['lastupdate'] = date('Y-m-d H:i:s');
             Capsule::table('tblhosting')->where('id', $service->id)->update($row);
             $updated++;
         }
 
-        panelica_log(__FUNCTION__, array('serverid' => $params['serverid']), 'Updated usage for ' . $updated . ' service(s)');
+        panelica_log('panelica_UsageUpdate', array('serverid' => $serverId), 'Updated usage for ' . $updated . ' service(s)');
         return 'success';
     } catch (Exception $e) {
-        panelica_log(__FUNCTION__, $params, $e->getMessage());
+        panelica_log('panelica_UsageUpdate', array('serverid' => $serverId), $e->getMessage());
         return $e->getMessage();
     }
 }

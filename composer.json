@@ -1,0 +1,20 @@
+{
+    "name": "panelica/whmcs-panelica",
+    "description": "Official Panelica server provisioning module for WHMCS",
+    "type": "whmcs-servers",
+    "license": "proprietary",
+    "require": {
+        "php": ">=7.4"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^13.3"
+    },
+    "autoload-dev": {
+        "files": [
+            "modules/servers/panelica/lib/PanelicaAPI.php"
+        ]
+    },
+    "scripts": {
+        "test": "phpunit"
+    }
+}
