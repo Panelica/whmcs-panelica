@@ -95,34 +95,109 @@ function panelica_AdminCustomButtonArray(array $params)
  */
 function panelica_Sync(array $params)
 {
+    return panelica_syncWith(panelica_getApi($params), $params);
+}
+
+/**
+ * The usage figures for one account, in the shape WHMCS keeps them.
+ *
+ * One place decides what "usage" means, because two things ask: the nightly
+ * run over every service on the server, and the Sync button on a single admin
+ * service page. They used to answer differently - the button left out the
+ * bandwidth allowance that comes with the plan, so an operator who moved a
+ * customer to a bigger plan and pressed Sync saw the new disk allowance appear
+ * and the old bandwidth allowance stay until the nightly run corrected it.
+ *
+ * A figure the panel would not give is left out rather than guessed, and an
+ * empty result means there is nothing to write - not a row to stamp.
+ *
+ * @param array<string, int> $planBwMb plan id => monthly allowance, when known
+ * @return array<string, int|string>
+ */
+function panelica_usageRowFor(PanelicaAPI $api, array $account, array $planBwMb = array())
+{
+    $row = array();
+
     try {
-        $api = panelica_getApi($params);
+        $disk = $api->getDiskUsage($account['id']);
+
+        // The figures themselves, not just the envelope around them. Asking
+        // only whether "data" existed meant any other shape - a list, an
+        // envelope from another call - put a zero on the customer's service,
+        // and a zero is worse than nothing: nothing leaves the last known
+        // figures alone, while zero reads as "using no disk at all". The
+        // bandwidth branch below has always asked the narrower question.
+        if (isset($disk['data']['used_mb'], $disk['data']['quota_mb'])) {
+            $row['diskusage'] = (int) $disk['data']['used_mb'];
+            $row['disklimit'] = (int) $disk['data']['quota_mb'];
+        }
+    } catch (Exception $e) {
+        // skip disk fields for this account
+    }
+
+    try {
+        $bw = $api->getAccountBandwidth($account['id']);
+        if (isset($bw['data']['bytes_used'])) {
+            $row['bwusage'] = (int) round(((int) $bw['data']['bytes_used']) / 1048576);
+        }
+    } catch (Exception $e) {
+        // skip bandwidth fields for this account
+    }
+
+    if (!empty($account['plan_id']) && isset($planBwMb[$account['plan_id']])) {
+        $row['bwlimit'] = $planBwMb[$account['plan_id']];
+    }
+
+    return $row;
+}
+
+/**
+ * Plan id => monthly bandwidth allowance, for filling bwlimit.
+ *
+ * Best effort: plans the panel will not list simply leave bwlimit alone.
+ *
+ * @return array<string, int>
+ */
+function panelica_planBandwidthMap(PanelicaAPI $api)
+{
+    $map = array();
+
+    try {
+        foreach (($api->listPlans()['data'] ?? array()) as $plan) {
+            if (!empty($plan['id'])) {
+                $map[$plan['id']] = isset($plan['monthly_bandwidth_mb']) ? (int) $plan['monthly_bandwidth_mb'] : 0;
+            }
+        }
+    } catch (Exception $e) {
+        // plans unavailable - bwlimit is simply not updated
+    }
+
+    return $map;
+}
+
+/**
+ * The work behind the admin "Sync From Panel" button, with the API handed in.
+ *
+ * @return string 'success' or a message for the admin
+ */
+function panelica_syncWith(PanelicaAPI $api, array $params)
+{
+    try {
+        $planBwMb = panelica_planBandwidthMap($api);
         $account = panelica_requireAccount($api, $params);
+        $row = panelica_usageRowFor($api, $account, $planBwMb);
 
-        $row = array();
-        try {
-            $disk = $api->getDiskUsage($account['id']);
-            if (isset($disk['data'])) {
-                $row['diskusage'] = (int) $disk['data']['used_mb'];
-                $row['disklimit'] = (int) $disk['data']['quota_mb'];
-            }
-        } catch (Exception $e) { /* skip */ }
-        try {
-            $bw = $api->getAccountBandwidth($account['id']);
-            if (isset($bw['data']['bytes_used'])) {
-                $row['bwusage'] = (int) round(((int) $bw['data']['bytes_used']) / 1048576);
-            }
-        } catch (Exception $e) { /* skip */ }
-
-        if (!empty($row) && !empty($params['serviceid'])) {
+        if ($row !== array() && !empty($params['serviceid'])) {
             $row['lastupdate'] = date('Y-m-d H:i:s');
             Capsule::table('tblhosting')->where('id', (int) $params['serviceid'])->update($row);
         }
 
-        panelica_log(__FUNCTION__, array('username' => $params['username']), $row);
+        panelica_log('panelica_Sync', array('username' => $params['username']), $row);
+
         return 'success';
     } catch (Exception $e) {
-        panelica_log(__FUNCTION__, $params, $e->getMessage());
+        panelica_log('panelica_Sync', array('username' => isset($params['username']) ? $params['username'] : ''), $e->getMessage());
+
         return $e->getMessage();
     }
 }
@@ -527,12 +602,27 @@ function panelica_ownedIds(PanelicaAPI $api, $tab, $aid, $did)
  */
 function panelica_managedPlanSpec(array $params)
 {
-    $intOpt = function ($idx, $default) use ($params) {
+    // A minus sign typed into a product's option field used to travel all the
+    // way to the panel, which stored it: a plan with a memory ceiling of -100
+    // and a process limit of -1, then applied to a customer's account. Two of
+    // these values were already held at zero below; they all are now. The
+    // inode quota is the exception and asks for its own treatment, because -1
+    // is how it says "no limit".
+    $intOpt = function ($idx, $default, $allowUnlimited = false) use ($params) {
         $raw = isset($params['configoption' . $idx]) ? trim((string) $params['configoption' . $idx]) : '';
         if ($raw === '' || !is_numeric($raw)) {
             return $default;
         }
-        return (int) $raw;
+        $value = (int) $raw;
+
+        // -1 travels only where the field's own hint promises it does; the
+        // panel stores it (measured). Anything below -1 is a typo nobody
+        // documents, and is still held at zero.
+        if ($allowUnlimited && $value === -1) {
+            return -1;
+        }
+
+        return max(0, $value);
     };
 
     $strOpt = function ($idx, $default) use ($params) {
@@ -540,24 +630,24 @@ function panelica_managedPlanSpec(array $params)
         return $raw !== '' ? $raw : $default;
     };
 
-    $diskMb    = $intOpt(2, 5120);
-    $bwMb      = $intOpt(3, 51200);
+    $diskMb    = $intOpt(2, 5120, true);
+    $bwMb      = $intOpt(3, 51200, true);
     $cpuPct    = $intOpt(4, 100);
     $memMb     = $intOpt(5, 1024);
     $procs     = $intOpt(6, 100);
     $ioMbs     = max(0, $intOpt(7, 0));
-    $maxDom    = $intOpt(8, 1);
+    $maxDom    = $intOpt(8, 1, true);
     $maxDb     = $intOpt(9, 5);
     $maxEmail  = $intOpt(10, 10);
     $maxFtp    = $intOpt(11, 5);
-    $maxCont   = $intOpt(12, 0);
+    $maxCont   = $intOpt(12, 0, true);
     $phpMemMb  = $intOpt(13, 256);
     $sshLevel  = $strOpt(14, 'none');
     if (!in_array($sshLevel, array('none', 'jailed', 'full'), true)) {
         $sshLevel = 'none';
     }
-    $inodeQuota = $intOpt(15, -1);
-    $maxSub     = $intOpt(16, 10);
+    $inodeQuota = $intOpt(15, -1, true);
+    $maxSub     = $intOpt(16, 10, true);
     $netMbit    = max(0, $intOpt(17, 0));
     $quotaMode  = $strOpt(18, 'strict');
     if (!in_array($quotaMode, array('strict', 'monitor', 'oversell'), true)) {
@@ -565,7 +655,7 @@ function panelica_managedPlanSpec(array $params)
     }
     $waf        = $strOpt(19, 'on') !== 'off';
     $backup     = $strOpt(20, 'on') !== 'off';
-    $maxCron    = $intOpt(21, 5);
+    $maxCron    = $intOpt(21, 5, true);
     $phpExec    = $intOpt(22, 30);
     $phpUpload  = $intOpt(23, 64);
 
@@ -659,6 +749,21 @@ function panelica_ensureManagedPlan(PanelicaAPI $api, array $params)
 
     $existing = $api->findPlanBySlug($slug);
     if ($existing !== null && !empty($existing['id'])) {
+        // The slug encodes the spec, but a plan half-built by an earlier run
+        // (POST wrote it with its final slug, the PATCH that applies the kernel
+        // limits then failed on a timeout/restart) wears that slug with the
+        // panel's own default limits still on it. Trusting the slug alone would
+        // attach every future customer of this product to an under-provisioned
+        // plan, silently and forever. Verify the advanced limits landed; repair
+        // once via PATCH if they did not, then insist they took.
+        if (panelica_planAdvancedMismatch($existing, $spec['advanced']) !== null) {
+            $api->updatePlan($existing['id'], array_merge($spec['basic'], $spec['advanced']));
+            $recheck = $api->findPlanBySlug($slug);
+            $bad = panelica_planAdvancedMismatch(is_array($recheck) ? $recheck : array(), $spec['advanced']);
+            if ($bad !== null) {
+                throw new Exception(sprintf('Managed plan repair failed: %s did not apply.', $bad));
+            }
+        }
         return $existing['id'];
     }
 
@@ -677,23 +782,44 @@ function panelica_ensureManagedPlan(PanelicaAPI $api, array $params)
     }
     $planId = $resp['data']['id'];
 
-    // Second call sets cgroups v2 + PHP columns the create endpoint does not accept.
-    $api->updatePlan($planId, $spec['advanced']);
+    // Second call sets cgroups v2 + PHP columns the create endpoint does not
+    // accept, and re-sends the basic columns too. The create endpoint binds the
+    // JSON into a Go struct saved with GORM, so a 0 or false there is the zero
+    // value: GORM drops the column and the database default wins (measured live,
+    // max_cron_jobs=0 was stored as 3 and backup_enabled=false as true). The
+    // PATCH endpoint writes a raw column map, so a "0 = disabled" / "off" option
+    // only sticks when it rides along on this call.
+    $api->updatePlan($planId, array_merge($spec['basic'], $spec['advanced']));
 
     // Verify the advanced limits really landed (no silent partial plan).
     $check = $api->findPlanBySlug($slug);
-    foreach (array('cpu_limit_percent', 'memory_limit_mb', 'process_limit') as $col) {
-        if (!isset($check[$col]) || (int) $check[$col] !== (int) $spec['advanced'][$col]) {
-            throw new Exception(sprintf(
-                'Managed plan verification failed: %s is %s, expected %s.',
-                $col, isset($check[$col]) ? $check[$col] : 'missing', $spec['advanced'][$col]
-            ));
-        }
+    $bad = panelica_planAdvancedMismatch(is_array($check) ? $check : array(), $spec['advanced']);
+    if ($bad !== null) {
+        throw new Exception(sprintf(
+            'Managed plan verification failed: %s is %s, expected %s.',
+            $bad, isset($check[$bad]) ? $check[$bad] : 'missing', $spec['advanced'][$bad]
+        ));
     }
 
     panelica_log('ensureManagedPlan', array('slug' => $slug, 'spec' => $spec), $planId);
 
     return $planId;
+}
+
+/**
+ * The advanced kernel column that a stored plan does not match, or null when
+ * all of them are in place. Shared by the create path and the early-return
+ * path so a plan is trusted only once its spec is actually on it.
+ */
+function panelica_planAdvancedMismatch(array $plan, array $advanced)
+{
+    foreach (array('cpu_limit_percent', 'memory_limit_mb', 'process_limit') as $col) {
+        if (!isset($plan[$col]) || (int) $plan[$col] !== (int) $advanced[$col]) {
+            return $col;
+        }
+    }
+
+    return null;
 }
 
 /**
@@ -850,8 +976,21 @@ function panelica_missingScopes(array $granted)
  */
 function panelica_CreateAccount(array $params)
 {
+    return panelica_createAccountWith(panelica_getApi($params), $params);
+}
+
+/**
+ * The work behind panelica_CreateAccount, with the API client handed in.
+ *
+ * Separate so the half-succeeded paths can be exercised: the account is made
+ * first and the website second, and what the operator is told when the second
+ * step fails depends on whether undoing the first one worked.
+ *
+ * @return string 'success' or a message for WHMCS
+ */
+function panelica_createAccountWith(PanelicaAPI $api, array $params)
+{
     try {
-        $api = panelica_getApi($params);
         $planId = panelica_resolvePlanId($api, isset($params['configoption1']) ? $params['configoption1'] : '', $params);
 
         $username = isset($params['username']) ? trim($params['username']) : '';
@@ -880,7 +1019,7 @@ function panelica_CreateAccount(array $params)
         }
 
         $resp = $api->createAccount($username, $password, $email, $fullName, $planId);
-        panelica_log(__FUNCTION__, array('username' => $username, 'email' => $email, 'plan_id' => $planId, 'password' => $password), $resp);
+        panelica_log('panelica_CreateAccount', array('username' => $username, 'email' => $email, 'plan_id' => $planId, 'password' => $password), $resp);
 
         $accountId = isset($resp['data']['id']) ? (string) $resp['data']['id'] : '';
 
@@ -890,14 +1029,29 @@ function panelica_CreateAccount(array $params)
         if ($domain !== '' && $accountId !== '') {
             try {
                 $domainResp = $api->createDomain($domain, $accountId);
-                panelica_log(__FUNCTION__ . ':domain', array('domain' => $domain, 'account_id' => $accountId), $domainResp);
+                panelica_log('panelica_CreateAccount:domain', array('domain' => $domain, 'account_id' => $accountId), $domainResp);
             } catch (Exception $domainError) {
+                // Only say it was rolled back if it was. When the panel refuses
+                // the removal too the account is still there, and an operator
+                // told otherwise retries, gets "already exists", and has no idea
+                // an orphan was left behind or under which name.
+                $rolledBack = true;
+
                 try {
                     $api->deleteAccount($accountId);
                 } catch (Exception $rollbackError) {
-                    panelica_log(__FUNCTION__ . ':rollback', array('account_id' => $accountId), $rollbackError->getMessage());
+                    $rolledBack = false;
+                    panelica_log('panelica_CreateAccount:rollback', array('account_id' => $accountId), $rollbackError->getMessage());
                 }
-                throw new Exception(sprintf('Website "%s" could not be created (account rolled back): %s', $domain, $domainError->getMessage()));
+
+                throw new Exception($rolledBack
+                    ? sprintf('Website "%s" could not be created (account rolled back): %s', $domain, $domainError->getMessage())
+                    : sprintf(
+                        'Website "%s" could not be created, and the account "%s" could not be removed either - it is still on the panel and has to be dealt with by hand: %s',
+                        $domain,
+                        $username,
+                        $domainError->getMessage()
+                    ));
             }
         }
 
@@ -907,7 +1061,7 @@ function panelica_CreateAccount(array $params)
 
         return 'success';
     } catch (Exception $e) {
-        panelica_log(__FUNCTION__, $params, $e->getMessage());
+        panelica_log('panelica_CreateAccount', $params, $e->getMessage());
         return $e->getMessage();
     }
 }
@@ -953,8 +1107,30 @@ function panelica_TerminateAccount(array $params)
 {
     try {
         $api = panelica_getApi($params);
+    } catch (Exception $e) {
+        panelica_log(__FUNCTION__, $params, $e->getMessage());
 
+        return $e->getMessage();
+    }
+
+    return panelica_terminateAccountWith($api, $params);
+}
+
+/**
+ * Testable body of the termination door.
+ */
+function panelica_terminateAccountWith(PanelicaAPI $api, array $params)
+{
+    try {
         $username = isset($params['username']) ? trim($params['username']) : '';
+        if ($username === '') {
+            // "Already gone from the panel" below is a deliberate kindness, but
+            // it has to be earned by actually looking. With no username there
+            // is nothing to look for, and reporting success would close the
+            // service in WHMCS while the account keeps running on the panel.
+            throw new Exception('This service has no username set in WHMCS, so no account could be identified to terminate.');
+        }
+
         $account = $api->findAccountByUsername($username);
         if ($account === null) {
             // Already gone on the panel — treat as success so WHMCS can close
@@ -1025,6 +1201,21 @@ function panelica_AdminServicesTabFields(array $params)
 {
     try {
         $api = panelica_getApi($params);
+    } catch (Exception $e) {
+        // The tab must render an error row, never bubble a fatal into the
+        // WHMCS admin page - which is what the try block used to cover.
+        return array('Panelica' => 'Error: ' . $e->getMessage());
+    }
+
+    return panelica_adminTabFieldsWith($api, $params);
+}
+
+/**
+ * Testable body of the admin service tab.
+ */
+function panelica_adminTabFieldsWith(PanelicaAPI $api, array $params)
+{
+    try {
         $account = panelica_requireAccount($api, $params);
 
         $fields = array(
@@ -1034,7 +1225,9 @@ function panelica_AdminServicesTabFields(array $params)
 
         try {
             $disk = $api->getDiskUsage($account['id']);
-            if (isset($disk['data']['used_mb'])) {
+            // Both figures or neither: formatMb(0) prints "unlimited", so a
+            // missing quota would tell the admin the account has no limit.
+            if (isset($disk['data']['used_mb'], $disk['data']['quota_mb'])) {
                 $fields['Disk Usage'] = (int) $disk['data']['used_mb'] . ' MB / '
                     . panelica_formatMb((int) $disk['data']['quota_mb']);
             }
@@ -1106,6 +1299,47 @@ function panelica_selfServiceCaps(array $scopes)
 }
 
 /**
+ * The account's own website, chosen the same way on every request.
+ *
+ * The panel lists an account's domains with no ORDER BY behind it, so row order
+ * is whatever the query plan produced and can change between two requests of
+ * the same page. Taking element zero meant the dashboard could name one website
+ * while the SSL, DNS and PHP tabs acted on another. The rows carry no primary
+ * flag, so the oldest one is used: that is the website provisioned when the
+ * service was ordered. Rows without a usable timestamp fall back to the name,
+ * which at least gives the same answer twice.
+ */
+function panelica_primaryDomain($domainsResponse)
+{
+    $rows = isset($domainsResponse['data']) && is_array($domainsResponse['data'])
+        ? $domainsResponse['data']
+        : array();
+
+    $best = array();
+    $bestKey = null;
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+
+        $stamp = isset($row['created_at']) ? strtotime((string) $row['created_at']) : false;
+        $name = isset($row['domain_name']) ? (string) $row['domain_name'] : '';
+        // Rows the panel dated sort before rows it did not; within each group
+        // the name breaks the tie so the answer never depends on row order.
+        $key = ($stamp === false)
+            ? array(1, PHP_INT_MAX, $name)
+            : array(0, $stamp, $name);
+
+        if ($bestKey === null || $key < $bestKey) {
+            $bestKey = $key;
+            $best = $row;
+        }
+    }
+
+    return $best;
+}
+
+/**
  * Client area: live overview + scope-aware self-service tabs
  * (email accounts, FTP accounts, subdomains).
  */
@@ -1113,7 +1347,11 @@ function panelica_ClientArea(array $params)
 {
     $host = !empty($params['serverhostname']) ? $params['serverhostname'] : $params['serverip'];
     $port = !empty($params['serverport']) ? (int) $params['serverport'] : 8443;
-    $panelUrl = 'https://' . $host . ':' . $port . '/';
+    // Escaped here rather than in the template, the way panelica_AdminLink
+    // does with the same string: it is printed into an href there and into
+    // three links in the client area, and only one of the two places building
+    // it was being careful.
+    $panelUrl = 'https://' . htmlspecialchars($host, ENT_QUOTES) . ':' . $port . '/';
 
     $vars = array(
         'panelUrl'    => $panelUrl,
@@ -1368,13 +1606,49 @@ function panelica_requireOwnedMailbox(PanelicaAPI $api, array $params, $emailId)
     return $emailId;
 }
 
+/**
+ * The account's own directory on the panel, for confining a path against.
+ */
+function panelica_accountRoot(PanelicaAPI $api, $accountId)
+{
+    $resp = $api->accessibleDirectories($accountId);
+    $roots = isset($resp['data']['directories']) && is_array($resp['data']['directories'])
+        ? $resp['data']['directories']
+        : array();
+
+    return !empty($roots[0]) ? rtrim($roots[0], '/') : '';
+}
+
+/**
+ * Like panelica_confinePath, but refuses instead of falling back to the root.
+ *
+ * Falling back is right for a listing - ask for somewhere odd, get shown your
+ * own home. It is very wrong for the doors that act on the path they are given:
+ * for a delete, "somewhere odd" would become "remove the customer's whole
+ * account directory".
+ *
+ * @return string the path, once it is known to be inside the account
+ * @throws Exception when it is not
+ */
+function panelica_requireConfinedPath($path, $root)
+{
+    $asked = rtrim(trim((string) $path), '/');
+
+    if ($asked === '' || panelica_confinePath($path, $root) !== $asked) {
+        throw new Exception('That path is not inside this account.');
+    }
+
+    return $asked;
+}
+
 /** Resolve the account + its primary domain id for a self-service action. */
 function panelica_ctx(PanelicaAPI $api, array $params)
 {
     $account = panelica_requireAccount($api, $params);
     $dr = $api->listAccountDomains($account['id']);
-    $domains = isset($dr['data']) && is_array($dr['data']) ? $dr['data'] : array();
-    $primaryDomainId = !empty($domains[0]['id']) ? $domains[0]['id'] : '';
+    // Same website the client area names on screen - see panelica_primaryDomain().
+    $primary = panelica_primaryDomain($dr);
+    $primaryDomainId = !empty($primary['id']) ? $primary['id'] : '';
     return array($account, $primaryDomainId);
 }
 
@@ -1718,9 +1992,20 @@ function panelica_CreateBackup(array $params)
 {
     try {
         $api = panelica_getApi($params);
-        panelica_requireAccount($api, $params);
+        $account = panelica_requireAccount($api, $params);
+        // Scope the backup to THIS account's domains only, exactly as the AJAX
+        // door (panelica_Api, op=create, tab=backups) already does. An empty
+        // domain list makes the panel back up EVERY account on the server:
+        // measured live, createBackup([]) returned an archive spanning four
+        // other tenants' domains. A client must never be able to reach that.
+        $dr = $api->listAccountDomains($account['id']);
+        $domainIds = array();
+        foreach (($dr['data'] ?? array()) as $d) {
+            if (is_array($d) && !empty($d['id'])) { $domainIds[] = $d['id']; }
+        }
+        if (empty($domainIds)) { throw new Exception('No websites available to back up yet.'); }
         $name = isset($_POST['backup_name']) ? trim($_POST['backup_name']) : '';
-        $api->createBackup(array(), $name);
+        $api->createBackup($domainIds, $name);
         panelica_setFlash('success', 'Backup started — it runs in the background.');
     } catch (Exception $e) { panelica_setFlash('danger', $e->getMessage()); }
     return '';
@@ -1759,6 +2044,7 @@ function panelica_FmMkdir(array $params)
         $path = isset($_POST['fm_path']) ? trim($_POST['fm_path']) : '';
         $name = isset($_POST['fm_name']) ? trim($_POST['fm_name']) : '';
         if ($path === '' || $name === '') { throw new Exception('Folder name is required.'); }
+        $path = panelica_requireConfinedPath($path, panelica_accountRoot($api, $account['id']));
         $api->createFile($account['id'], $path, $name, 'folder');
         panelica_setFlash('success', 'Folder created.');
     } catch (Exception $e) { panelica_setFlash('danger', $e->getMessage()); }
@@ -1772,6 +2058,7 @@ function panelica_FmNewFile(array $params)
         $path = isset($_POST['fm_path']) ? trim($_POST['fm_path']) : '';
         $name = isset($_POST['fm_name']) ? trim($_POST['fm_name']) : '';
         if ($path === '' || $name === '') { throw new Exception('File name is required.'); }
+        $path = panelica_requireConfinedPath($path, panelica_accountRoot($api, $account['id']));
         $api->createFile($account['id'], $path, $name, 'file');
         panelica_setFlash('success', 'File created.');
     } catch (Exception $e) { panelica_setFlash('danger', $e->getMessage()); }
@@ -1785,6 +2072,7 @@ function panelica_FmSave(array $params)
         $path = isset($_POST['fm_file']) ? trim($_POST['fm_file']) : '';
         $content = isset($_POST['fm_content']) ? (string) $_POST['fm_content'] : '';
         if ($path === '') { throw new Exception('Missing file path.'); }
+        $path = panelica_requireConfinedPath($path, panelica_accountRoot($api, $account['id']));
         $api->writeFileContent($account['id'], $path, $content);
         panelica_setFlash('success', 'File saved.');
     } catch (Exception $e) { panelica_setFlash('danger', $e->getMessage()); }
@@ -1797,6 +2085,7 @@ function panelica_FmDelete(array $params)
         $account = panelica_requireAccount($api, $params);
         $path = isset($_POST['fm_target']) ? trim($_POST['fm_target']) : '';
         if ($path === '') { throw new Exception('Missing target path.'); }
+        $path = panelica_requireConfinedPath($path, panelica_accountRoot($api, $account['id']));
         $api->deleteFiles($account['id'], array($path), false);
         panelica_setFlash('success', 'Deleted (moved to trash).');
     } catch (Exception $e) { panelica_setFlash('danger', $e->getMessage()); }
@@ -1826,7 +2115,8 @@ function panelica_Api(array $params)
         $account = panelica_requireAccount($api, $params);
         $aid = $account['id'];
         $dr = $api->listAccountDomains($aid);
-        $did = !empty($dr['data'][0]['id']) ? $dr['data'][0]['id'] : '';
+        $primary = panelica_primaryDomain($dr);
+        $did = !empty($primary['id']) ? $primary['id'] : '';
         $op = isset($_REQUEST['pnl_op']) ? $_REQUEST['pnl_op'] : 'list';
         $tab = isset($_REQUEST['pnl_tab']) ? $_REQUEST['pnl_tab'] : '';
         $P = function ($k, $d = '') { return isset($_POST[$k]) ? $_POST[$k] : $d; };
@@ -1863,7 +2153,7 @@ function panelica_Api(array $params)
             $caps = panelica_selfServiceCaps($scopes);
             $usedMb = isset($disk['data']['used_mb']) ? (int) $disk['data']['used_mb'] : 0;
             $quotaMb = isset($disk['data']['quota_mb']) ? (int) $disk['data']['quota_mb'] : 0;
-            $d0 = isset($dr['data'][0]) && is_array($dr['data'][0]) ? $dr['data'][0] : array();
+            $d0 = $primary;
             $dname = !empty($d0['domain_name']) ? $d0['domain_name'] : (!empty($d0['name']) ? $d0['name'] : (!empty($d0['domain']) ? $d0['domain'] : ''));
             echo json_encode(array('ok' => true, 'caps' => $caps, 'domain_name' => $dname,
                 'disk_used' => $usedMb, 'disk_quota' => panelica_formatMb($quotaMb),
@@ -2039,7 +2329,7 @@ function panelica_Api(array $params)
             $dv = $api->getDeliverability($did)['data'] ?? array();
             $dk = isset($dv['dkim']) && is_array($dv['dkim']) ? $dv['dkim'] : array();
             $sp = isset($dv['spf']) && is_array($dv['spf']) ? $dv['spf'] : array();
-            $dn = !empty($dv['domain_name']) ? $dv['domain_name'] : (isset($dr['data'][0]['domain_name']) ? $dr['data'][0]['domain_name'] : '');
+            $dn = !empty($dv['domain_name']) ? $dv['domain_name'] : (isset($primary['domain_name']) ? $primary['domain_name'] : '');
             $extra['deliverability'] = array(
                 'domain_name' => $dn,
                 'dkim' => array('enabled' => !empty($dk['enabled']), 'public_key' => isset($dk['public_key']) ? $dk['public_key'] : ''),
@@ -2149,18 +2439,7 @@ function panelica_UsageUpdate(array $params)
 function panelica_usageUpdateWith(PanelicaAPI $api, $serverId)
 {
     try {
-        // Map plan UUID -> monthly bandwidth quota (for bwlimit).
-        $planBwMb = array();
-        try {
-            $plansResp = $api->listPlans();
-            foreach ((isset($plansResp['data']) ? $plansResp['data'] : array()) as $plan) {
-                if (!empty($plan['id'])) {
-                    $planBwMb[$plan['id']] = isset($plan['monthly_bandwidth_mb']) ? (int) $plan['monthly_bandwidth_mb'] : 0;
-                }
-            }
-        } catch (Exception $e) {
-            // Plans unavailable — bwlimit will simply not be updated.
-        }
+        $planBwMb = panelica_planBandwidthMap($api);
 
         // Map username -> panel account.
         $accountsResp = $api->listAccounts();
@@ -2184,34 +2463,7 @@ function panelica_usageUpdateWith(PanelicaAPI $api, $serverId)
             }
             $account = $byUsername[$uname];
 
-            // Stamped only once there is something to stamp. WHMCS shows
-            // "last updated" on the service and an operator reads it as "these
-            // figures are from last night", so writing it after every call had
-            // failed dressed month-old numbers up as fresh ones.
-            $row = array();
-
-            try {
-                $disk = $api->getDiskUsage($account['id']);
-                if (isset($disk['data'])) {
-                    $row['diskusage'] = (int) $disk['data']['used_mb'];
-                    $row['disklimit'] = (int) $disk['data']['quota_mb'];
-                }
-            } catch (Exception $e) {
-                // skip disk fields for this account
-            }
-
-            try {
-                $bw = $api->getAccountBandwidth($account['id']);
-                if (isset($bw['data']['bytes_used'])) {
-                    $row['bwusage'] = (int) round(((int) $bw['data']['bytes_used']) / 1048576);
-                }
-            } catch (Exception $e) {
-                // skip bandwidth fields for this account
-            }
-
-            if (!empty($account['plan_id']) && isset($planBwMb[$account['plan_id']])) {
-                $row['bwlimit'] = $planBwMb[$account['plan_id']];
-            }
+            $row = panelica_usageRowFor($api, $account, $planBwMb);
 
             if (empty($row)) {
                 continue;

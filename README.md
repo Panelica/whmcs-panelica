@@ -107,7 +107,7 @@ Managed plans are hidden from the manual plan dropdown.
 | **PHP** | **7.4+** — the module contains no PHP 8-only syntax. Tested on **PHP 8.3**. |
 | **PHP extensions** | `curl`, `json`, `hash` (all standard). **No ionCube** — the module ships as plain, readable PHP. |
 | **Client area themes** | Verified on the standard **Six, Twenty-One and Nexus** themes — pure vanilla JS with both Bootstrap 3 and 5 tab markup, so it renders and works across theme generations. |
-| **Panelica server** | Any currently supported version for the core lifecycle. The richer client-area tools need a recent external-server build: **SSO** ≥ 1.0.5, **WordPress management / Email Deliverability / accurate disk usage** ≥ 1.0.6, **account-scoped self-service deletes** ≥ 1.0.7. Older panels simply hide the features they don't support. |
+| **Panelica server** | Any currently supported version for the core lifecycle. The richer client-area tools need a recent external-server build: **SSO** ≥ 1.0.5, **WordPress management / Email Deliverability / accurate disk usage** ≥ 1.0.6, **account-scoped self-service deletes** ≥ 1.0.7. What a client area offers is decided by the API key's scopes, not by the panel's version - the module does not ask what version it is - so on an older panel a feature it lacks is still offered and fails when used. |
 | **Panelica license** | The **API Access** feature must be enabled. |
 
 > **Tested matrix (evidence):** WHMCS 9.0.6-release.1 · PHP 8.3.31 — full 40-function

@@ -181,9 +181,22 @@ if (!class_exists('PanelicaAPI')) {
             $accounts = isset($resp['data']) && is_array($resp['data']) ? $resp['data'] : array();
             $needle = strtolower(trim((string) $username));
             foreach ($accounts as $account) {
-                if (isset($account['username']) && strtolower($account['username']) === $needle) {
-                    return $account;
+                if (!isset($account['username']) || strtolower($account['username']) !== $needle) {
+                    continue;
                 }
+
+                // The listing is a listing of users, and the panel's own
+                // administrators are in it - root included. A service whose
+                // username happens to equal an administrator's name must not
+                // point this module at that administrator: suspend, change
+                // password and terminate would all act on them. A listing that
+                // carries no role at all is an older panel, and is taken at
+                // face value so nothing that works today stops working.
+                if (isset($account['role']) && strtoupper((string) $account['role']) !== 'USER') {
+                    continue;
+                }
+
+                return $account;
             }
             return null;
         }
@@ -749,8 +762,21 @@ if (!class_exists('PanelicaAPI')) {
             // sign with an empty body for DELETE, yet still transmit the body.
             $signBody = ($method === 'DELETE') ? '' : $bodyString;
 
-            // Sign the path the backend will see ("/v1/..."), NOT the public path.
-            $stringToSign = $method . $path . $timestamp . $signBody;
+            // Sign the path the backend will see ("/v1/..."), NOT the public path -
+            // and see it the way the backend reads it. The backend builds its
+            // string from the decoded path plus the raw query string, so a value
+            // that had to be escaped to travel (a space in a backup filename, an
+            // accented character) must be signed unescaped or the panel answers
+            // 401. The query half stays exactly as sent.
+            $signPath = $path;
+            $queryAt = strpos($signPath, '?');
+            if ($queryAt === false) {
+                $signPath = rawurldecode($signPath);
+            } else {
+                $signPath = rawurldecode(substr($signPath, 0, $queryAt)) . substr($signPath, $queryAt);
+            }
+
+            $stringToSign = $method . $signPath . $timestamp . $signBody;
             $signature = hash_hmac('sha256', $stringToSign, $this->apiSecret);
 
             $url = 'https://' . $this->host . ':' . $this->port . self::PUBLIC_PREFIX . $path;
@@ -794,20 +820,37 @@ if (!class_exists('PanelicaAPI')) {
                 || (isset($decoded['status']) && $decoded['status'] === 'error');
 
             if ($isError) {
-                $message = '';
+                $reported = '';
                 foreach (array('error', 'message') as $k) {
                     if (!empty($decoded[$k]) && is_string($decoded[$k])) {
-                        $message = $decoded[$k];
+                        $reported = $decoded[$k];
                         break;
                     }
                 }
-                if (!empty($decoded['details']) && is_string($decoded['details'])) {
-                    $message .= ($message !== '' ? ' — ' : '') . $decoded['details'];
+                $details = !empty($decoded['details']) && is_string($decoded['details'])
+                    ? $decoded['details']
+                    : '';
+
+                // The panel answers with a translation key it has not
+                // translated in "error" and the sentence in "details". Joining
+                // them showed a customer the machine key with the useful half
+                // behind it. The sentence leads; the key stays reachable as the
+                // API code and in the module log, which is where an operator
+                // looks for it.
+                $isKey = $reported !== '' && preg_match('/^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)+$/', $reported) === 1;
+
+                if ($isKey && $details !== '') {
+                    $message = $details;
+                } elseif ($reported !== '') {
+                    $message = $reported . ($details !== '' ? ' — ' . $details : '');
+                } else {
+                    $message = $details !== '' ? $details : 'API request failed with HTTP ' . $httpStatus;
                 }
-                if ($message === '') {
-                    $message = 'API request failed with HTTP ' . $httpStatus;
-                }
-                $apiCode = isset($decoded['code']) && is_string($decoded['code']) ? $decoded['code'] : '';
+
+                $apiCode = isset($decoded['code']) && is_string($decoded['code']) && $decoded['code'] !== ''
+                    ? $decoded['code']
+                    : ($isKey ? $reported : '');
+
                 throw new PanelicaAPIException($message, $httpStatus, $apiCode);
             }
 

@@ -272,10 +272,18 @@ function pnlEsc(s){var d=document.createElement('div');d.textContent=(s==null?''
 function pnlJs(s){return String(s==null?'':s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function pnlTok(){return '&token='+encodeURIComponent(window.csrfToken||'');}
 function pnlFlash(t,ok){var m=document.getElementById('pnl-flash');if(!m)return;m.innerHTML=t?('<div class="alert alert-'+(ok?'success':'warning')+'">'+pnlEsc(t)+'</div>'):'';if(t&&ok)setTimeout(function(){m.innerHTML='';},4000);}
+// A reply that is not JSON - a session expired into a login page, a fatal, a
+// gateway error - used to reject, and the callers that act on the result had no
+// failure branch: the button disabled itself and stayed that way with nothing
+// on screen. Both helpers now answer in the shape every caller already handles.
+function pnlFail(e){return {ok:false,error:'The panel could not be reached. Please try again.'};}
 function pnlApi(op,tab,data){
   var body='pnl_op='+op+'&pnl_tab='+tab+pnlTok();
   for(var k in (data||{})){body+='&'+encodeURIComponent(k)+'='+encodeURIComponent(data[k]);}
-  return fetch(PNL_API,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body}).then(function(r){return r.json();});
+  return fetch(PNL_API,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body}).then(function(r){return r.json();}).catch(pnlFail);
+}
+function pnlGet(qs){
+  return fetch(PNL_API+qs+pnlTok(),{credentials:'same-origin'}).then(function(r){return r.json();}).catch(pnlFail);
 }
 function pnlLoad(tab){
   if(tab==='ssl'){return pnlLoadSsl();}
@@ -283,7 +291,7 @@ function pnlLoad(tab){
   if(tab==='deliverability'){return pnlLoadDeliverability();}
   var tb=document.getElementById('pt-'+tab);if(!tb)return;
   var cols=parseInt(tb.getAttribute('data-pnl-cols')||'2',10);
-  fetch(PNL_API+'&pnl_op=list&pnl_tab='+tab+pnlTok(),{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
+  pnlGet('&pnl_op=list&pnl_tab='+tab).then(function(d){
     if(!d.ok){tb.innerHTML='<tr><td colspan="'+cols+'" style="color:#e74c3c;">'+pnlEsc(d.error)+'</td></tr>';return;}
     var rows=d.rows||[];
     if(!rows.length){tb.innerHTML='<tr><td colspan="'+cols+'" class="text-center" style="opacity:.6;">None yet.</td></tr>';}
@@ -302,14 +310,15 @@ function pnlLoad(tab){
   }).catch(function(){tb.innerHTML='<tr><td colspan="'+cols+'">Load failed.</td></tr>';});
 }
 function pnlLoadSsl(){
-  fetch(PNL_API+'&pnl_op=list&pnl_tab=ssl'+pnlTok(),{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
+  pnlGet('&pnl_op=list&pnl_tab=ssl').then(function(d){
     var st=document.getElementById('ssl-status'),bt=document.getElementById('ssl-btn');if(!st)return;
-    var s=(d&&d.ssl)||{};var has=!!s.has_ssl;
+    if(!d||!d.ok){st.innerHTML='<span style="color:#e74c3c;">'+pnlEsc((d&&d.error)||'Failed to load.')+'</span>';st.style.opacity='1';if(bt)bt.style.display='none';return;}
+    var s=d.ssl||{};var has=!!s.has_ssl;
     st.innerHTML='Domain: <strong>'+pnlEsc(s.domain_name||'')+'</strong><br>Status: '+(has?'<span class="pnl-badge ok"><i class="fas fa-check"></i> Certificate active</span>':'<span class="pnl-badge no"><i class="fas fa-times"></i> No certificate</span>');st.style.opacity='1';
     if(bt){bt.style.display='';bt.innerHTML='<i class="fas fa-certificate"></i> '+(has?'Renew certificate':"Get free Let's Encrypt certificate");}
   });
 }
-function pnlSslIssue(btn){btn.disabled=true;fetch(PNL_API+'&pnl_op=ssl_issue'+pnlTok(),{method:'POST',credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){btn.disabled=false;pnlFlash(d.ok?'SSL certificate requested — issuance runs in the background.':d.error,d.ok);});}
+function pnlSslIssue(btn){btn.disabled=true;pnlApi('ssl_issue','ssl',{}).then(function(d){btn.disabled=false;pnlFlash(d.ok?'SSL certificate requested — issuance runs in the background.':d.error,d.ok);});}
 function pnlDkimRecord(domain,pubkey){
   if(!domain||!pubkey)return '';
   var name='default._domainkey.'+domain, val='v=DKIM1; k=rsa; p='+pubkey;
@@ -335,14 +344,15 @@ function pnlDelivRender(d){
 }
 function pnlLoadDeliverability(){
   var el=document.getElementById('pnl-deliv');if(el){el.innerHTML='Loading…';el.style.opacity='.6';}
-  fetch(PNL_API+'&pnl_op=list&pnl_tab=deliverability'+pnlTok(),{credentials:'same-origin'}).then(function(r){return r.json();}).then(pnlDelivRender);
+  pnlGet('&pnl_op=list&pnl_tab=deliverability').then(pnlDelivRender);
 }
 function pnlDkimEnable(btn){var t=btn.innerHTML;btn.disabled=true;btn.innerHTML='<i class="fas fa-spinner fa-spin"></i> Enabling…';
   pnlApi('dkim_enable','',{}).then(function(d){if(d.ok){pnlFlash(d.msg||'DKIM enabled.',true);pnlLoadDeliverability();}else{btn.disabled=false;btn.innerHTML=t;pnlFlash(d.error||'Failed to enable DKIM.',false);}});}
 function pnlLoadSettings(){
-  fetch(PNL_API+'&pnl_op=list&pnl_tab=settings'+pnlTok(),{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
-    var s=(d&&d.settings)||{},php=s.php||{};
+  pnlGet('&pnl_op=list&pnl_tab=settings').then(function(d){
     var sel=document.getElementById('set-phpver');
+    if(!d||!d.ok){if(sel)sel.innerHTML='<option>'+pnlEsc((d&&d.error)||'Failed to load')+'</option>';return;}
+    var s=d.settings||{},php=s.php||{};
     if(sel){sel.innerHTML=(s.versions||[]).filter(function(v){return v.available;}).map(function(v){return '<option'+(v.version===php.php_version?' selected':'')+'>'+pnlEsc(v.version)+'</option>';}).join('')||'<option>'+pnlEsc(php.php_version||'')+'</option>';}
   }).catch(function(){});
 }
@@ -411,7 +421,7 @@ function pnlApplyCaps(caps){
   wrap.querySelectorAll('.pnl-tile[href^="#pnl-"]').forEach(function(a){var cap=PNL_HREF2CAP[a.getAttribute('href').substring(1)];if(cap&&caps[cap]===false)a.style.display='none';});
 }
 function pnlDashboard(){
-  fetch(PNL_API+'&pnl_op=dashboard'+pnlTok(),{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
+  pnlGet('&pnl_op=dashboard').then(function(d){
     if(!d||!d.ok)return;
     var set=function(id,v){var e=document.getElementById(id);if(e)e.textContent=(v==null?'':v);};
     if(d.domain_name){set('db-domain',d.domain_name);var fs=document.querySelector('input[name="fwd_source"]');if(fs)fs.placeholder='info@'+d.domain_name;var dh=document.getElementById('db-dnsdomain');if(dh)dh.textContent=d.domain_name;}
@@ -455,10 +465,10 @@ function fmLoad(path){fmMsg('');
     document.getElementById('fm-body').innerHTML=rows;
   }).catch(function(){fmMsg('Load failed.',false);});
 }
-function fmPost(op,data){var body='fm_op='+op+pnlTok();for(var k in data){body+='&'+k+'='+encodeURIComponent(data[k]);}return fetch(PNL_FM_URL,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body}).then(function(r){return r.json();});}
+function fmPost(op,data){var body='fm_op='+op+pnlTok();for(var k in data){body+='&'+k+'='+encodeURIComponent(data[k]);}return fetch(PNL_FM_URL,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body}).then(function(r){return r.json();}).catch(pnlFail);}
 function fmCreate(op){var id=(op==='mkdir')?'fm-newdir':'fm-newfile';var el=document.getElementById(id);var name=(el.value||'').trim();if(!name)return;fmPost(op,{fm_path:fmCur,fm_name:name}).then(function(d){if(d.ok){el.value='';fmLoad(fmCur);}else fmMsg(d.error,false);});}
 function fmDelete(path,name){if(!confirm('Delete '+name+'?'))return;fmPost('delete',{fm_target:path}).then(function(d){if(d.ok)fmLoad(fmCur);else fmMsg(d.error,false);});}
-function fmEdit(path){fetch(PNL_FM_URL+'&fm_op=read&fm_path='+encodeURIComponent(path)+pnlTok(),{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){if(!d.ok){fmMsg(d.error,false);return;}document.getElementById('fm-edit-path').textContent=d.path;document.getElementById('fm-edit-content').value=d.content;var ed=document.getElementById('fm-editor');ed.setAttribute('data-path',d.path);ed.style.display='';ed.scrollIntoView({behavior:'smooth'});});}
+function fmEdit(path){fetch(PNL_FM_URL+'&fm_op=read&fm_path='+encodeURIComponent(path)+pnlTok(),{credentials:'same-origin'}).then(function(r){return r.json();}).catch(pnlFail).then(function(d){if(!d.ok){fmMsg(d.error,false);return;}document.getElementById('fm-edit-path').textContent=d.path;document.getElementById('fm-edit-content').value=d.content;var ed=document.getElementById('fm-editor');ed.setAttribute('data-path',d.path);ed.style.display='';ed.scrollIntoView({behavior:'smooth'});});}
 function fmSave(){var ed=document.getElementById('fm-editor');fmPost('save',{fm_file:ed.getAttribute('data-path'),fm_content:document.getElementById('fm-edit-content').value}).then(function(d){fmMsg(d.ok?'Saved.':(d.error||'Error'),d.ok);});}
 function fmCloseEditor(){document.getElementById('fm-editor').style.display='none';}
 {/literal}</script>
