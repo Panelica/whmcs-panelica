@@ -65,13 +65,16 @@ final class LiveLifecycleTest extends TestCase
 
     private static function api(): PanelicaAPI
     {
-        return new PanelicaAPI(
+        // The suite's own set-up and clean-up wait out the panel's rate limit:
+        // a clean-up refused with 429 left accounts behind on the panel. The
+        // module's functions under test are left exactly as WHMCS runs them.
+        return (new PanelicaAPI(
             (string) getenv('PANELICA_TEST_HOST'),
             (int) (getenv('PANELICA_TEST_PORT') ?: 8443),
             (string) getenv('PANELICA_TEST_KEY'),
             (string) getenv('PANELICA_TEST_SECRET'),
             true
-        );
+        ))->waitOnRateLimit(65);
     }
 
     /** WHMCS hands the module an array shaped like this. */

@@ -9,12 +9,12 @@ Automates the full hosting account lifecycle through the Panelica External API
 
 | WHMCS action | What happens on the Panelica server |
 |---|---|
-| Create | Hosting account is created on the selected plan; the ordered domain is provisioned as a website (nginx+apache, PHP, Let's Encrypt SSL). If the website fails, the account is rolled back so retries are clean. |
+| Create | Hosting account is created on the selected plan; the ordered domain is provisioned as a website (nginx+apache, PHP, Let's Encrypt SSL). If the website fails, the account is rolled back so retries are clean. The panel allows one account per email address, so a client's second service on the same server is created with a tagged address (`client+whmcs<serviceid>@example.com`) that delivers to the same inbox; the first keeps the plain address. |
 | Suspend / Unsuspend | Account is suspended / re-activated |
 | Terminate | Account is deleted (all panel resources removed) |
 | Change Password | Panel login password is updated |
 | Upgrade / Downgrade | Account is moved to the new Panelica plan — **kernel cgroup limits re-applied instantly** |
-| Usage Update (nightly) | Disk & bandwidth usage and limits synced into WHMCS |
+| Usage Update (nightly) | Disk & bandwidth usage and limits synced into WHMCS. When the panel's API rate limit is reached the run waits and carries on; a service the panel did not answer for keeps its previous figures and is not marked as synced, and the module log says how many. |
 | Client Area | Full self-service suite (see below) — dashboard, email, DNS, files, databases, WordPress and more, without ever leaving WHMCS |
 
 ## Single Sign-On (one-click panel login)
@@ -146,7 +146,7 @@ No activation step is needed — server modules are picked up automatically.
      - `plans:write` *(managed plan mode)*
      - `bandwidth:read`
    - **IP Whitelist** *(recommended)*: your WHMCS server's IP address.
-   - **Rate limit tier**: `professional` recommended for busy client areas.
+   - **Rate limit tier**: `professional` recommended for busy client areas. The default tier allows 60 requests a minute; the nightly usage run needs two per service and waits when it has to, so on a large server it takes longer rather than skipping services.
 4. Create. The panel shows the **API Key** (`pk_live_...`) and
    **API Secret** (`sk_live_...`) **only once** — copy both now.
 
@@ -233,6 +233,10 @@ them between plans and deletes them again.
     PANELICA_TEST_KEY=pk_live_... \
     PANELICA_TEST_SECRET=sk_live_... \
     vendor/bin/phpunit --testsuite integration
+
+The suite makes more than 60 requests a minute, the default limit of an API
+key; give its key the `professional` tier, or it will be refused part of the
+way through.
 
 Optional: `PANELICA_TEST_PORT` (default 8443) and `PANELICA_TEST_PLAN` (a plan
 UUID; otherwise the first plan on the panel is used). Every account it creates

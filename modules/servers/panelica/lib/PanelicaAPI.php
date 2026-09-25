@@ -31,11 +31,20 @@ if (!class_exists('PanelicaAPIException')) {
         /** @var string Machine-readable error code from the API, if any */
         protected $apiCode = '';
 
-        public function __construct($message, $httpStatus = 0, $apiCode = '')
+        /** @var int Seconds the panel asked the caller to wait (rate limit), 0 if none */
+        protected $retryAfter = 0;
+
+        public function __construct($message, $httpStatus = 0, $apiCode = '', $retryAfter = 0)
         {
             parent::__construct($message);
             $this->httpStatus = (int) $httpStatus;
             $this->apiCode = (string) $apiCode;
+            $this->retryAfter = max(0, (int) $retryAfter);
+        }
+
+        public function getRetryAfter()
+        {
+            return $this->retryAfter;
         }
 
         public function getHttpStatus()
@@ -78,6 +87,13 @@ if (!class_exists('PanelicaAPI')) {
         /** @var int cURL total timeout in seconds */
         protected $timeout = 60;
 
+        /** @var int Longest wait, in seconds, when the panel rate-limits a
+         *  request; 0 = do not wait (see waitOnRateLimit()). */
+        protected $rateLimitWait = 0;
+
+        /** Attempts per request when waiting on the rate limit is enabled. */
+        const RATE_LIMIT_ATTEMPTS = 3;
+
         /** @var string Public prefix in front of the External API (see class doc) */
         const PUBLIC_PREFIX = '/api/external';
 
@@ -103,6 +119,31 @@ if (!class_exists('PanelicaAPI')) {
             $this->apiKey = trim((string) $apiKey);
             $this->apiSecret = trim((string) $apiSecret);
             $this->verifyTls = (bool) $verifyTls;
+        }
+
+        /**
+         * Wait and try again when the panel rate-limits a request.
+         *
+         * The panel allows each API key a number of requests a minute (60 by
+         * default) and answers 429 with how long to wait. Off by default: a
+         * customer pressing a button in the client area must not sit through a
+         * minute's wait. The nightly usage run turns it on, because there the
+         * alternative is skipping services while reporting them as synced.
+         *
+         * @param int $maxSeconds longest single wait; 0 turns waiting off
+         * @return $this
+         */
+        public function waitOnRateLimit($maxSeconds)
+        {
+            $this->rateLimitWait = max(0, (int) $maxSeconds);
+
+            return $this;
+        }
+
+        /** Seam so tests can record a wait instead of sleeping through it. */
+        protected function pause($seconds)
+        {
+            sleep(max(1, (int) $seconds));
         }
 
         // -------------------------------------------------------------
@@ -742,6 +783,28 @@ if (!class_exists('PanelicaAPI')) {
          */
         public function request($method, $path, $body = null)
         {
+            for ($attempt = 1; ; $attempt++) {
+                try {
+                    return $this->requestOnce($method, $path, $body);
+                } catch (PanelicaAPIException $e) {
+                    if ($e->getHttpStatus() !== 429 || $this->rateLimitWait <= 0 || $attempt >= self::RATE_LIMIT_ATTEMPTS) {
+                        throw $e;
+                    }
+                    // Signed again on the next pass: the timestamp is part of
+                    // the signature and a stale one is refused.
+                    $this->pause(min($e->getRetryAfter() > 0 ? $e->getRetryAfter() : 60, $this->rateLimitWait));
+                }
+            }
+        }
+
+        /**
+         * One signed request, no retries.
+         *
+         * @return array Decoded JSON response
+         * @throws PanelicaAPIException
+         */
+        protected function requestOnce($method, $path, $body = null)
+        {
             if ($this->apiKey === '' || $this->apiSecret === '') {
                 throw new PanelicaAPIException('Panelica API key/secret is not configured on this server.');
             }
@@ -818,6 +881,30 @@ if (!class_exists('PanelicaAPI')) {
 
             $isError = ($httpStatus < 200 || $httpStatus >= 300)
                 || (isset($decoded['status']) && $decoded['status'] === 'error');
+
+            if ($isError && isset($decoded['error']) && is_array($decoded['error'])) {
+                // The rate limiter answers with an object, not a sentence, so
+                // the parsing below found nothing and the customer was shown
+                // "API request failed with HTTP 429".
+                $err = $decoded['error'];
+                $retryAfter = isset($err['retry_after']) ? (int) $err['retry_after'] : 0;
+                $message = !empty($err['message']) && is_string($err['message'])
+                    ? rtrim($err['message'], '.')
+                    : 'The panel refused the request (HTTP ' . $httpStatus . ')';
+                if ($httpStatus === 429) {
+                    $message .= sprintf(
+                        '. Try again in %d seconds, or raise the rate limit tier of this API key on the panel.',
+                        $retryAfter > 0 ? $retryAfter : 60
+                    );
+                }
+
+                throw new PanelicaAPIException(
+                    $message,
+                    $httpStatus,
+                    isset($err['code']) && is_string($err['code']) ? $err['code'] : '',
+                    $retryAfter
+                );
+            }
 
             if ($isError) {
                 $reported = '';

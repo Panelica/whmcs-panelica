@@ -57,6 +57,14 @@ class FakePanelicaAPI extends PanelicaAPI
     /** @var array<int, bool> TLS verification flag per call, in order. */
     public array $verifyFlags = [];
 
+    /** @var array<int, int> Seconds the client asked to wait, in order - never actually slept. */
+    public array $pauses = [];
+
+    protected function pause($seconds)
+    {
+        $this->pauses[] = (int) $seconds;
+    }
+
     public function queueJson(array $payload, int $status = 200): void
     {
         $this->queue[] = ['status' => $status, 'body' => json_encode($payload), 'errno' => 0, 'error' => ''];

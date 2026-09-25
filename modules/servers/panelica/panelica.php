@@ -144,6 +144,13 @@ function panelica_usageRowFor(PanelicaAPI $api, array $account, array $planBwMb 
         // skip bandwidth fields for this account
     }
 
+    // The plan's allowance is known without asking about this account, so on
+    // its own it is not a reading: writing it made a service the panel had not
+    // answered for look synced - "last updated now" over stale figures.
+    if ($row === array()) {
+        return $row;
+    }
+
     if (!empty($account['plan_id']) && isset($planBwMb[$account['plan_id']])) {
         $row['bwlimit'] = $planBwMb[$account['plan_id']];
     }
@@ -995,6 +1002,60 @@ function panelica_CreateAccount(array $params)
  *
  * @return string 'success' or a message for WHMCS
  */
+/**
+ * The address to try again with when the panel refused the client's own
+ * because another account on the server already has it - or null when that
+ * is not why it refused, or there is nothing to tag the address with.
+ *
+ * The panel says so with the key "emailAlreadyExists" today. Should it start
+ * answering with a translated sentence instead, the key is gone from the
+ * reply, so the account list is asked: this path runs only after a refusal.
+ */
+function panelica_secondAccountEmail(PanelicaAPI $api, PanelicaAPIException $refusal, $email, array $params)
+{
+    $serviceId = isset($params['serviceid']) ? (int) $params['serviceid'] : 0;
+    if ($serviceId <= 0 || strpos((string) $email, '@') === false) {
+        return null;
+    }
+
+    $said = $refusal->getMessage() . ' ' . $refusal->getApiCode();
+    $taken = stripos($said, 'emailAlreadyExists') !== false;
+
+    if (!$taken) {
+        try {
+            foreach (($api->listAccounts()['data'] ?? array()) as $account) {
+                if (isset($account['email']) && strcasecmp((string) $account['email'], (string) $email) === 0) {
+                    $taken = true;
+                    break;
+                }
+            }
+        } catch (Exception $e) {
+            return null;
+        }
+    }
+
+    return $taken ? panelica_taggedEmail($email, $serviceId) : null;
+}
+
+/**
+ * bob@example.com for service 77 -> bob+whmcs77@example.com. A tag already on
+ * the address is replaced rather than stacked.
+ */
+function panelica_taggedEmail($email, $serviceId)
+{
+    $at = strrpos((string) $email, '@');
+    if ($at === false) {
+        return (string) $email;
+    }
+    $local = substr($email, 0, $at);
+    $plus = strpos($local, '+');
+    if ($plus !== false) {
+        $local = substr($local, 0, $plus);
+    }
+
+    return $local . '+whmcs' . (int) $serviceId . substr($email, $at);
+}
+
 function panelica_createAccountWith(PanelicaAPI $api, array $params)
 {
     try {
@@ -1025,7 +1086,21 @@ function panelica_createAccountWith(PanelicaAPI $api, array $params)
             throw new Exception(sprintf('An account named "%s" already exists on the Panelica server.', $username));
         }
 
-        $resp = $api->createAccount($username, $password, $email, $fullName, $planId);
+        try {
+            $resp = $api->createAccount($username, $password, $email, $fullName, $planId);
+        } catch (PanelicaAPIException $createError) {
+            // The panel keeps one account per email address, so a client's
+            // second service on this server was refused outright and the paid
+            // order could not be provisioned. Their first account keeps the
+            // plain address; this one gets a tagged address that still
+            // delivers to the same inbox.
+            $tagged = panelica_secondAccountEmail($api, $createError, $email, $params);
+            if ($tagged === null) {
+                throw $createError;
+            }
+            $email = $tagged;
+            $resp = $api->createAccount($username, $password, $email, $fullName, $planId);
+        }
         panelica_log('panelica_CreateAccount', array('username' => $username, 'email' => $email, 'plan_id' => $planId, 'password' => $password), $resp);
 
         $accountId = isset($resp['data']['id']) ? (string) $resp['data']['id'] : '';
@@ -2446,6 +2521,11 @@ function panelica_UsageUpdate(array $params)
 function panelica_usageUpdateWith(PanelicaAPI $api, $serverId)
 {
     try {
+        // Two questions per service against a limit of 60 a minute by default:
+        // without waiting, everything past the first thirty services or so was
+        // refused and left out.
+        $api->waitOnRateLimit(65);
+
         $planBwMb = panelica_planBandwidthMap($api);
 
         // Map username -> panel account.
@@ -2463,6 +2543,7 @@ function panelica_usageUpdateWith(PanelicaAPI $api, $serverId)
             ->get(array('id', 'username'));
 
         $updated = 0;
+        $unread = 0;
         foreach ($services as $service) {
             $uname = strtolower(trim((string) $service->username));
             if ($uname === '' || !isset($byUsername[$uname])) {
@@ -2473,6 +2554,7 @@ function panelica_usageUpdateWith(PanelicaAPI $api, $serverId)
             $row = panelica_usageRowFor($api, $account, $planBwMb);
 
             if (empty($row)) {
+                $unread++;
                 continue;
             }
 
@@ -2481,7 +2563,12 @@ function panelica_usageUpdateWith(PanelicaAPI $api, $serverId)
             $updated++;
         }
 
-        panelica_log('panelica_UsageUpdate', array('serverid' => $serverId), 'Updated usage for ' . $updated . ' service(s)');
+        panelica_log(
+            'panelica_UsageUpdate',
+            array('serverid' => $serverId),
+            'Updated usage for ' . $updated . ' service(s)'
+                . ($unread > 0 ? '; ' . $unread . ' could not be read and keep their previous figures' : '')
+        );
         return 'success';
     } catch (Exception $e) {
         panelica_log('panelica_UsageUpdate', array('serverid' => $serverId), $e->getMessage());
