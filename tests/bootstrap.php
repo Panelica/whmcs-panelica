@@ -104,3 +104,18 @@ class FakePanelicaAPI extends PanelicaAPI
         return null;
     }
 }
+
+/**
+ * Inject a fake transport for a WHMCS-facing function that calls
+ * panelica_getApi() internally. Pair with panelica_test_clearApi() in tearDown.
+ */
+function panelica_test_useApi(FakePanelicaAPI $api): void
+{
+    $GLOBALS['PANELICA_TEST_API'] = $api;
+}
+
+/** Remove the injected transport so nothing leaks between tests. */
+function panelica_test_clearApi(): void
+{
+    unset($GLOBALS['PANELICA_TEST_API']);
+}

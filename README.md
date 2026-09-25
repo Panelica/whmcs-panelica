@@ -1,5 +1,7 @@
 # Panelica WHMCS Server Module
 
+[![Tests](https://github.com/Panelica/whmcs-panelica/actions/workflows/tests.yml/badge.svg)](https://github.com/Panelica/whmcs-panelica/actions/workflows/tests.yml)
+
 Official WHMCS provisioning module for [Panelica](https://www.panelica.com) control panel servers.
 
 Automates the full hosting account lifecycle through the Panelica External API
@@ -212,9 +214,16 @@ Advanced Overrides — is applied and kernel-verified on both create and change.
     composer install
     composer test                       # offline suite, talks to nothing
 
-The offline suite covers request signing, the self-signed certificate retry,
-error handling, ownership scoping and the usage sync, with WHMCS itself
-doubled — no panel and no WHMCS installation needed.
+The offline suite drives every function WHMCS calls - the admin lifecycle
+(create, suspend, unsuspend, terminate, password, package change, renew, single
+sign-on, test connection, plan loader, usage sync), every client-area create,
+delete and restore door, the file manager's path confinement, request signing,
+the self-signed certificate retry, error handling and ownership scoping - with
+WHMCS and the panel both doubled. No panel and no WHMCS installation needed.
+
+Every push runs it on GitHub Actions, and checks the module's syntax on each
+PHP version it supports, 7.4 to 8.5 (the suite itself needs PHP 8.4, as
+PHPUnit does).
 
 A second suite drives the module's real lifecycle against a panel. Point it at
 a **test** server, never one with customers on it: it creates accounts, moves

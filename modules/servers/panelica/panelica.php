@@ -210,6 +210,13 @@ function panelica_syncWith(PanelicaAPI $api, array $params)
  */
 function panelica_getApi(array $params)
 {
+    // Test seam: a test may inject a fake transport so the WHMCS-facing
+    // functions can be exercised without a live panel. This global is set only
+    // by the PHPUnit bootstrap and is never present in a WHMCS runtime.
+    if (isset($GLOBALS['PANELICA_TEST_API'])) {
+        return $GLOBALS['PANELICA_TEST_API'];
+    }
+
     $host = !empty($params['serverhostname']) ? $params['serverhostname'] : $params['serverip'];
     $port = !empty($params['serverport']) ? (int) $params['serverport'] : 8443;
 
